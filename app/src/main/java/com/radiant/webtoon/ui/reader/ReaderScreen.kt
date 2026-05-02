@@ -1,0 +1,487 @@
+package com.radiant.webtoon.ui.reader
+
+import android.view.WindowManager
+import android.widget.Toast
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
+import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.wrapContentHeight
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.pager.HorizontalPager
+import androidx.compose.foundation.pager.rememberPagerState
+import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.ArrowBack
+import androidx.compose.material.icons.filled.Crop
+import androidx.compose.material.icons.filled.NavigateNext
+import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.SwapVert
+import androidx.compose.foundation.layout.width
+import androidx.compose.material3.ButtonDefaults
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.ExperimentalMaterial3Api
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
+import androidx.compose.material3.Surface
+import androidx.compose.material3.Text
+import androidx.compose.material3.TopAppBar
+import androidx.compose.material3.TopAppBarDefaults
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
+import coil.compose.AsyncImage
+import coil.compose.SubcomposeAsyncImage
+import coil.request.CachePolicy
+import coil.request.ImageRequest
+import kotlinx.coroutines.launch
+import com.radiant.webtoon.core.settings.SettingsManager
+
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@Composable
+fun ReaderScreen(
+    repository: com.radiant.webtoon.core.repository.WebtoonRepository,
+    sourceId: String,
+    webtoonId: String,
+    chapterId: String,
+    chapterTitle: String,
+    onBackClick: () -> Unit
+) {
+    val context = LocalContext.current
+    val view = LocalView.current
+    val settingsManager = remember { SettingsManager(context) }
+
+    val keepScreenOn by settingsManager.keepScreenOn.collectAsStateWithLifecycle(initialValue = true)
+
+    val viewModel: ReaderViewModel = viewModel(
+        factory = ReaderViewModelFactory(context.applicationContext as android.app.Application, repository)
+    )
+    val pages by viewModel.pages.collectAsStateWithLifecycle()
+    val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
+    val sourceHeaders by viewModel.sourceHeaders.collectAsStateWithLifecycle()
+    
+    val readingMode by viewModel.readingMode.collectAsStateWithLifecycle()
+    val backgroundColor by viewModel.backgroundColor.collectAsStateWithLifecycle()
+    val cropBorders by viewModel.cropBorders.collectAsStateWithLifecycle()
+    val nextChapter by viewModel.nextChapter.collectAsStateWithLifecycle()
+
+    val coroutineScope = rememberCoroutineScope()
+
+    LaunchedEffect(sourceId, webtoonId, chapterId) {
+        viewModel.loadChapter(sourceId, webtoonId, chapterId, chapterTitle)
+    }
+
+    // Apply keep screen on flag
+    DisposableEffect(keepScreenOn) {
+        val window = (context as? android.app.Activity)?.window
+        if (keepScreenOn) {
+            window?.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        onDispose {
+            window?.clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+    }
+
+    // Explicitly sort pages by their index to guarantee top-to-bottom order
+    val sortedPages = remember(pages) {
+        pages.mapIndexed { index, url -> index to url }
+            .sortedBy { it.first }
+            .map { it.second }
+    }
+
+    var showOverlay by remember { mutableStateOf(false) }
+    var showSettingsSheet by remember { mutableStateOf(false) }
+    
+    val listState = rememberLazyListState()
+    val pagerState = rememberPagerState(pageCount = { 
+        if (nextChapter != null) sortedPages.size + 1 else sortedPages.size 
+    })
+
+    // Page counter — derived from the list/pager state
+    val currentPage by remember(readingMode) {
+        derivedStateOf {
+            if (readingMode == 0) listState.firstVisibleItemIndex + 1
+            else pagerState.currentPage + 1
+        }
+    }
+
+    // Convert source headers to a Map for Coil's ImageRequest
+    val headersMap = remember(sourceHeaders) {
+        val map = mutableMapOf<String, String>()
+        for (i in 0 until sourceHeaders.size) {
+            map[sourceHeaders.name(i)] = sourceHeaders.value(i)
+        }
+        map
+    }
+
+    // ── Immersive System Bars control ──
+    val window = remember { (context as android.app.Activity).window }
+    val insetsController = remember {
+        androidx.core.view.WindowCompat.getInsetsController(window, view)
+    }
+
+    DisposableEffect(showOverlay) {
+        if (showOverlay) {
+            insetsController.show(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+        } else {
+            insetsController.hide(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+            insetsController.systemBarsBehavior =
+                androidx.core.view.WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+        }
+        onDispose {
+            // Always restore system bars when leaving the reader
+            insetsController.show(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize().background(backgroundColor)) {
+        if (isLoading) {
+            CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
+        } else if (sortedPages.isEmpty()) {
+            Text("No pages found", modifier = Modifier.align(Alignment.Center), color = Color.White)
+        } else {
+            if (readingMode == 0) {
+                // Vertical scrolling (webtoon-style) — sequential top-to-bottom via Coil
+                LazyColumn(
+                    state = listState,
+                    reverseLayout = false,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(Unit) {
+                            detectTapGestures(onTap = { showOverlay = !showOverlay })
+                        },
+                    contentPadding = PaddingValues(0.dp),
+                    verticalArrangement = Arrangement.spacedBy(0.dp)
+                ) {
+                    itemsIndexed(sortedPages, key = { index, _ -> index }) { index, pageUrl ->
+                        SubcomposeAsyncImage(
+                            model = ImageRequest.Builder(context)
+                                .data(pageUrl)
+                                .apply {
+                                    headersMap.forEach { (key, value) ->
+                                        addHeader(key, value)
+                                    }
+                                }
+                                .crossfade(true)
+                                .diskCachePolicy(CachePolicy.ENABLED)
+                                .memoryCachePolicy(CachePolicy.ENABLED)
+                                .build(),
+                            contentDescription = "Page ${index + 1}",
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .wrapContentHeight(),
+                            contentScale = if (cropBorders) ContentScale.FillWidth else ContentScale.Fit,
+                            loading = {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(400.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(32.dp),
+                                        color = Color.White.copy(alpha = 0.7f),
+                                        strokeWidth = 2.dp
+                                    )
+                                }
+                            },
+                            error = {
+                                Box(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .height(200.dp),
+                                    contentAlignment = Alignment.Center
+                                ) {
+                                    Text(
+                                        text = "Failed to load page ${index + 1}",
+                                        color = Color.Red.copy(alpha = 0.7f),
+                                        style = MaterialTheme.typography.bodySmall
+                                    )
+                                }
+                            }
+                        )
+                    }
+                    
+                    item {
+                        if (nextChapter != null) {
+                            val chapter = nextChapter!!
+                            Box(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .padding(vertical = 48.dp, horizontal = 24.dp),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                OutlinedButton(
+                                    onClick = {
+                                        viewModel.loadChapter(sourceId, webtoonId, chapter.url, chapter.name)
+                                        coroutineScope.launch {
+                                            listState.scrollToItem(0)
+                                        }
+                                    },
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.5f)),
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                                    shape = RoundedCornerShape(12.dp)
+                                ) {
+                                    Icon(Icons.Default.NavigateNext, contentDescription = null, modifier = Modifier.size(20.dp))
+                                    Spacer(Modifier.size(8.dp))
+                                    Text("Next: ${chapter.name}")
+                                }
+                            }
+                        } else {
+                            Spacer(modifier = Modifier.height(100.dp))
+                        }
+                    }
+                }
+            } else {
+                // Horizontal pager (LTR or RTL)
+                val isRtl = readingMode == 2
+                HorizontalPager(
+                    state = pagerState,
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .pointerInput(Unit) {
+                            detectTapGestures(onTap = { showOverlay = !showOverlay })
+                        },
+                    beyondBoundsPageCount = 2,
+                    reverseLayout = isRtl,
+                    key = { it }
+                ) { pageIndex ->
+                    if (pageIndex < sortedPages.size) {
+                        AsyncImage(
+                            model = ImageRequest.Builder(context)
+                                .data(sortedPages[pageIndex])
+                                .apply {
+                                    headersMap.forEach { (key, value) ->
+                                        addHeader(key, value)
+                                    }
+                                }
+                                .crossfade(true)
+                                .allowHardware(false)
+                                .memoryCachePolicy(CachePolicy.ENABLED)
+                                .diskCachePolicy(CachePolicy.ENABLED)
+                                .build(),
+                            contentDescription = "Page ${pageIndex + 1}",
+                            modifier = Modifier.fillMaxSize(),
+                            contentScale = if (cropBorders) ContentScale.FillWidth else ContentScale.Fit
+                        )
+                    } else {
+                        if (nextChapter != null) {
+                            val chapter = nextChapter!!
+                            Box(
+                                modifier = Modifier.fillMaxSize(),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                OutlinedButton(
+                                    onClick = {
+                                        viewModel.loadChapter(sourceId, webtoonId, chapter.url, chapter.name)
+                                        coroutineScope.launch {
+                                            pagerState.scrollToPage(0)
+                                        }
+                                    },
+                                    border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.5f)),
+                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                                    shape = RoundedCornerShape(12.dp)
+                                ) {
+                                    Icon(Icons.Default.NavigateNext, contentDescription = null, modifier = Modifier.size(20.dp))
+                                    Spacer(Modifier.size(8.dp))
+                                    Text("Next: ${chapter.name}")
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            // ── Floating pill page counter — always visible, hidden behind overlay ──
+            AnimatedVisibility(
+                visible = !showOverlay,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = 24.dp),
+                enter = fadeIn(),
+                exit = fadeOut()
+            ) {
+                Surface(
+                    shape = RoundedCornerShape(20.dp),
+                    color = Color.Black.copy(alpha = 0.7f),
+                    shadowElevation = 4.dp
+                ) {
+                    Text(
+                        text = "$currentPage / ${sortedPages.size}",
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                        color = Color.White,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        fontSize = 14.sp
+                    )
+                }
+            }
+        }
+
+        // ── Immersive Overlay (TopAppBar + bottom controls) ──
+        AnimatedVisibility(
+            visible = showOverlay,
+            enter = fadeIn() + slideInVertically(initialOffsetY = { -it }),
+            exit = fadeOut() + slideOutVertically(targetOffsetY = { -it })
+        ) {
+            Column(modifier = Modifier.fillMaxSize()) {
+                TopAppBar(
+                    title = { Text(chapterTitle, color = Color.White) },
+                    navigationIcon = {
+                        IconButton(onClick = onBackClick) {
+                            Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = Color.White)
+                        }
+                    },
+                    actions = {
+                        IconButton(onClick = { showSettingsSheet = true }) {
+                            Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Color.White)
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(
+                        containerColor = Color.Black.copy(alpha = 0.7f),
+                        titleContentColor = Color.White,
+                        navigationIconContentColor = Color.White
+                    )
+                )
+
+                Spacer(modifier = Modifier.weight(1f))
+
+                // ── Bottom bar — slides in from bottom ──
+                AnimatedVisibility(
+                    visible = showOverlay,
+                    enter = fadeIn() + slideInVertically(initialOffsetY = { it }),
+                    exit = fadeOut() + slideOutVertically(targetOffsetY = { it })
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(
+                                Brush.verticalGradient(
+                                    listOf(Color.Transparent, Color.Black.copy(alpha = 0.9f))
+                                )
+                            )
+                            .padding(bottom = 24.dp, top = 48.dp)
+                    ) {
+                        Column {
+                            // ── Page scrubbing Slider + Counter Row ──
+                            if (sortedPages.isNotEmpty()) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 16.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    val sliderValue = if (readingMode == 0) {
+                                        listState.firstVisibleItemIndex.toFloat()
+                                    } else {
+                                        pagerState.currentPage.toFloat()
+                                    }
+                                    
+                                    Slider(
+                                        value = sliderValue,
+                                        onValueChange = { newValue ->
+                                            coroutineScope.launch {
+                                                if (readingMode == 0) {
+                                                    listState.scrollToItem(newValue.toInt())
+                                                } else {
+                                                    pagerState.scrollToPage(newValue.toInt())
+                                                }
+                                            }
+                                        },
+                                        valueRange = 0f..(sortedPages.size - 1).coerceAtLeast(0).toFloat(),
+                                        modifier = Modifier.weight(1f),
+                                        colors = SliderDefaults.colors(
+                                            thumbColor = MaterialTheme.colorScheme.primary,
+                                            activeTrackColor = MaterialTheme.colorScheme.primary,
+                                            inactiveTrackColor = Color.White.copy(alpha = 0.3f)
+                                        )
+                                    )
+                                    
+                                    Spacer(modifier = Modifier.width(12.dp))
+                                    
+                                    Text(
+                                        text = "$currentPage / ${sortedPages.size}",
+                                        color = Color.White,
+                                        style = MaterialTheme.typography.labelMedium,
+                                        modifier = Modifier.width(60.dp),
+                                        textAlign = androidx.compose.ui.text.style.TextAlign.End
+                                    )
+                                }
+                            }
+
+                            // ── Controls row ──
+                            Row(
+                                modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+                                horizontalArrangement = Arrangement.SpaceEvenly
+                            ) {
+                                IconButton(onClick = { showSettingsSheet = true }) {
+                                    Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Color.White)
+                                }
+                                IconButton(onClick = { viewModel.setCropBorders(!cropBorders) }) {
+                                    Icon(
+                                        Icons.Default.Crop, 
+                                        contentDescription = "Crop borders", 
+                                        tint = if (cropBorders) MaterialTheme.colorScheme.primary else Color.White
+                                    )
+                                }
+                                IconButton(onClick = { 
+                                    val nextMode = (readingMode + 1) % 3
+                                    viewModel.setReadingMode(nextMode)
+                                }) {
+                                    Icon(Icons.Default.SwapVert, contentDescription = "Toggle reading direction", tint = Color.White)
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        if (showSettingsSheet) {
+            ReaderSettingsSheet(
+                viewModel = viewModel,
+                onDismiss = { showSettingsSheet = false }
+            )
+        }
+    }
+}
