@@ -13,7 +13,6 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
-import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Refresh
@@ -25,18 +24,15 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.vector.rememberVectorPainter
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import coil.compose.AsyncImage
-import coil.request.ImageRequest
 import com.radiant.webtoon.core.source.ExtensionManager
 import com.radiant.webtoon.core.source.Source
+import com.radiant.webtoon.ui.components.DownloadManagerIconButton
+import com.radiant.webtoon.ui.components.SourceIcon
 import com.radiant.webtoon.ui.extensions.ExtensionsScreen
 import kotlinx.coroutines.launch
 
@@ -48,7 +44,8 @@ fun BrowseScreen(
     onBrowseClick: (String) -> Unit,
     onSearchClick: () -> Unit,
     onWebViewClick: (String) -> Unit,
-    onMigrateSourceClick: (String) -> Unit
+    onMigrateSourceClick: (String) -> Unit,
+    onDownloadQueueClick: () -> Unit = {},
 ) {
     val browseViewModel: BrowseViewModel = viewModel()
     val pagerState = rememberPagerState(pageCount = { 3 })
@@ -104,7 +101,11 @@ fun BrowseScreen(
                                     IconButton(onClick = { isSearching = true }) {
                                         Icon(Icons.Default.Search, contentDescription = "Search Extensions")
                                     }
-                                    IconButton(onClick = { /* TODO: Trigger Refresh */ }) {
+                                    IconButton(onClick = {
+                                        coroutineScope.launch {
+                                            extensionManager.refreshAvailable()
+                                        }
+                                    }) {
                                         Icon(Icons.Default.Refresh, contentDescription = "Refresh")
                                     }
                                 }
@@ -112,6 +113,7 @@ fun BrowseScreen(
                                 }
                             }
                         }
+                        DownloadManagerIconButton(onClick = onDownloadQueueClick)
                     }
                 )
                 TabRow(selectedTabIndex = pagerState.currentPage) {
@@ -157,7 +159,15 @@ fun SourcesTab(extensionManager: ExtensionManager, searchQuery: String, onBrowse
 
     if (sources.isEmpty()) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            Text("No sources installed.", style = MaterialTheme.typography.bodyLarge)
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                Text("No sources installed.", style = MaterialTheme.typography.bodyLarge)
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    "Open Extensions and install curated English sources.",
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
         return
     }
@@ -223,8 +233,6 @@ fun SourceListItem(
     onClick: () -> Unit,
     onWebViewClick: () -> Unit
 ) {
-    val context = LocalContext.current
-
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -245,19 +253,10 @@ fun SourceListItem(
                 ),
             contentAlignment = Alignment.Center
         ) {
-            AsyncImage(
-                model = ImageRequest.Builder(context)
-                    .data(source.icon)
-                    .crossfade(true)
-                    .build(),
-                placeholder = rememberVectorPainter(Icons.Default.Extension),
-                error = rememberVectorPainter(Icons.Default.Extension),
-                fallback = rememberVectorPainter(Icons.Default.Extension),
+            SourceIcon(
+                icon = source.icon,
                 contentDescription = "${source.name} icon",
-                modifier = Modifier
-                    .size(48.dp)
-                    .clip(RoundedCornerShape(8.dp)),
-                contentScale = ContentScale.Crop
+                size = 48.dp
             )
         }
 
@@ -316,7 +315,6 @@ fun ExtensionsTab(extensionManager: ExtensionManager, searchQuery: String) {
 @Composable
 fun MigrateTab(viewModel: BrowseViewModel, onMigrateSourceClick: (String) -> Unit) {
     val items by viewModel.migrateItems.collectAsStateWithLifecycle()
-    val context = LocalContext.current
 
     if (items.isEmpty()) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
@@ -363,7 +361,6 @@ fun MigrateSourceItem(
     item: MigrateItem,
     onClick: () -> Unit
 ) {
-    val context = LocalContext.current
     Row(
         modifier = Modifier
             .fillMaxWidth()
@@ -384,19 +381,10 @@ fun MigrateSourceItem(
                 ),
             contentAlignment = Alignment.Center
         ) {
-            AsyncImage(
-                model = ImageRequest.Builder(context)
-                    .data(item.source.icon)
-                    .crossfade(true)
-                    .build(),
-                placeholder = rememberVectorPainter(Icons.Default.Extension),
-                error = rememberVectorPainter(Icons.Default.Extension),
-                fallback = rememberVectorPainter(Icons.Default.Extension),
+            SourceIcon(
+                icon = item.source.icon,
                 contentDescription = "${item.source.name} icon",
-                modifier = Modifier
-                    .size(48.dp)
-                    .clip(RoundedCornerShape(8.dp)),
-                contentScale = ContentScale.Crop
+                size = 48.dp
             )
         }
 

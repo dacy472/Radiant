@@ -19,5 +19,6 @@ data class Chapter(
     @SerializedName("title") val title: String,
     @SerializedName("url") val url: String? = null,
     @SerializedName("date") val date: String? = null,
-    @SerializedName("number") val number: Double? = null
+    @SerializedName("number") val number: Double? = null,
+    @SerializedName("read") val read: Boolean = false,
 )

@@ -120,6 +120,7 @@ class ChapterDownloadWorker(
 
             // ── 5. Stream pages into a ZipOutputStream ──
             val client = networkHelper.client
+            var archivedPages = 0
             ZipOutputStream(cbzFile.outputStream().buffered()).use { zos ->
                 pageUrls.forEachIndexed { index, pageUrl ->
                     val entryName = String.format("%03d.jpg", index + 1)
@@ -127,51 +128,57 @@ class ChapterDownloadWorker(
                         val request = Request.Builder()
                             .url(pageUrl)
                             .build()
-                        val response = client.newCall(request).execute()
-                        if (!response.isSuccessful) {
-                            Log.w(TAG, "Page ${index+1} HTTP ${response.code} — skipping")
-                            return@forEachIndexed
+                        client.newCall(request).execute().use { response ->
+                            if (!response.isSuccessful) {
+                                Log.w(TAG, "Page ${index + 1} HTTP ${response.code} — skipping")
+                                return@forEachIndexed
+                            }
+                            val bytes = response.body?.bytes() ?: return@forEachIndexed
+
+                            zos.putNextEntry(ZipEntry(entryName))
+                            zos.write(bytes)
+                            zos.closeEntry()
+                            archivedPages++
+
+                            Log.d(TAG, "Archived page ${index + 1}/$total → $entryName")
                         }
-                        val bytes = response.body?.bytes()
-                            ?: return@forEachIndexed
-
-                        zos.putNextEntry(ZipEntry(entryName))
-                        zos.write(bytes)
-                        zos.closeEntry()
-
-                        Log.d(TAG, "Archived page ${index+1}/$total → $entryName")
                     } catch (e: Exception) {
-                        Log.e(TAG, "Failed to archive page ${index+1}: ${e.message}")
-                        // Continue — partial archives are still openable
+                        Log.e(TAG, "Failed to archive page ${index + 1}: ${e.message}")
                     }
 
                     // Update progress after each page
                     val progress = ((index + 1).toFloat() / total * 100).toInt()
                     downloadDao.insert(
                         task.copy(
-                            status          = DownloadStatus.DOWNLOADING,
-                            totalPages      = total,
-                            downloadedPages = index + 1,
-                            progress        = progress
+                            status = DownloadStatus.DOWNLOADING,
+                            totalPages = total,
+                            downloadedPages = archivedPages,
+                            progress = progress
                         )
                     )
-                    // Push a progress notification
                     showProgressNotification(chapterTitle, index + 1, total)
                 }
+            }
+
+            if (archivedPages == 0) {
+                cbzFile.delete()
+                downloadDao.insert(task.copy(status = DownloadStatus.FAILED))
+                Log.e(TAG, "No pages archived for chapter $chapterId")
+                return@withContext Result.failure()
             }
 
             // ── 6. Mark complete in the DB ──
             downloadDao.insert(
                 task.copy(
-                    status          = DownloadStatus.COMPLETED,
-                    progress        = 100,
-                    totalPages      = total,
-                    downloadedPages = total,
-                    localPath       = cbzFile.absolutePath
+                    status = DownloadStatus.COMPLETED,
+                    progress = 100,
+                    totalPages = total,
+                    downloadedPages = archivedPages,
+                    localPath = cbzFile.absolutePath
                 )
             )
             showCompletionNotification(webtoonTitle, chapterTitle)
-            Log.i(TAG, "Download complete → ${cbzFile.absolutePath}")
+            Log.i(TAG, "Download complete → ${cbzFile.absolutePath} ($archivedPages/$total pages)")
             Result.success()
 
         } catch (e: Exception) {

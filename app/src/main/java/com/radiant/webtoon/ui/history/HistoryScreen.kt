@@ -1,6 +1,6 @@
 package com.radiant.webtoon.ui.history
 
-import androidx.compose.foundation.clickable
+import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -19,7 +19,12 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
+import com.radiant.webtoon.WebtoonApplication
 import com.radiant.webtoon.core.repository.WebtoonRepository
+import com.radiant.webtoon.ui.components.DownloadManagerIconButton
+import com.radiant.webtoon.ui.components.animatedListRow
+import com.radiant.webtoon.ui.components.listItemRippleClickable
+import com.radiant.webtoon.ui.components.SpringAlertDialog
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -34,17 +39,20 @@ data class HistoryItem(
     val chapterId: String
 )
 
-@OptIn(ExperimentalMaterial3Api::class)
+@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
 fun HistoryScreen(
     repository: WebtoonRepository,
     onWebtoonClick: (String, String) -> Unit, // sourceId, webtoonId
-    onChapterClick: (String, String, String, String) -> Unit // sourceId, webtoonId, chapterId, chapterTitle
+    onChapterClick: (String, String, String, String) -> Unit, // sourceId, webtoonId, chapterId, chapterTitle
+    onDownloadQueueClick: () -> Unit = {},
 ) {
     val viewModel: HistoryViewModel = viewModel(
         factory = HistoryViewModelFactory(repository)
     )
     val historyItems by viewModel.historyState.collectAsStateWithLifecycle()
+    val dateFormatPattern by (androidx.compose.ui.platform.LocalContext.current.applicationContext as WebtoonApplication)
+        .settingsManager.dateFormat.collectAsState(initial = "MM/dd/yyyy")
     var showClearDialog by remember { mutableStateOf(false) }
 
     Scaffold(
@@ -57,12 +65,13 @@ fun HistoryScreen(
                             Icon(Icons.Default.DeleteSweep, contentDescription = "Clear History")
                         }
                     }
+                    DownloadManagerIconButton(onClick = onDownloadQueueClick)
                 }
             )
         }
     ) { padding ->
         if (showClearDialog) {
-            AlertDialog(
+            SpringAlertDialog(
                 onDismissRequest = { showClearDialog = false },
                 title = { Text("Clear History") },
                 text = { Text("Are you sure you want to clear your reading history? This action cannot be undone.") },
@@ -80,7 +89,7 @@ fun HistoryScreen(
                     TextButton(onClick = { showClearDialog = false }) {
                         Text("Cancel")
                     }
-                }
+                },
             )
         }
         if (historyItems.isEmpty()) {
@@ -114,7 +123,9 @@ fun HistoryScreen(
             ) {
                 items(historyItems, key = { it.id }) { item ->
                     HistoryItemRow(
+                        modifier = Modifier.animatedListRow(),
                         item = item,
+                        dateFormatPattern = dateFormatPattern,
                         onClick = {
                             onChapterClick(item.sourceId, item.webtoonId, item.chapterId, item.chapterTitle)
                         },
@@ -131,62 +142,75 @@ fun HistoryScreen(
 @Composable
 fun HistoryItemRow(
     item: HistoryItem,
+    modifier: Modifier = Modifier,
+    dateFormatPattern: String = "MM/dd/yyyy",
     onClick: () -> Unit,
-    onCoverClick: () -> Unit
+    onCoverClick: () -> Unit,
 ) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .clickable(onClick = onClick)
-            .padding(horizontal = 16.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        AsyncImage(
-            model = item.webtoonThumbnail,
-            contentDescription = "Cover",
-            contentScale = ContentScale.Crop,
+    Column(modifier = modifier) {
+        Row(
             modifier = Modifier
-                .size(width = 48.dp, height = 64.dp)
-                .clip(RoundedCornerShape(8.dp))
-                .clickable(onClick = onCoverClick)
-        )
-        
-        Spacer(modifier = Modifier.width(16.dp))
-        
-        Column(modifier = Modifier.weight(1f)) {
-            Text(
-                text = item.webtoonTitle,
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.Bold,
-                color = MaterialTheme.colorScheme.onSurface,
-                maxLines = 1
+                .fillMaxWidth()
+                .listItemRippleClickable(onClick = onClick)
+                .padding(horizontal = 16.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            AsyncImage(
+                model = item.webtoonThumbnail,
+                contentDescription = "Cover",
+                contentScale = ContentScale.Crop,
+                modifier = Modifier
+                    .size(width = 48.dp, height = 64.dp)
+                    .clip(RoundedCornerShape(8.dp))
+                    .listItemRippleClickable(onClick = onCoverClick),
             )
-            
-            Text(
-                text = item.chapterTitle,
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                maxLines = 1
-            )
-            
-            Text(
-                text = formatRelativeTime(item.lastRead),
-                style = MaterialTheme.typography.labelSmall,
-                color = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f)
-            )
+
+            Spacer(modifier = Modifier.width(16.dp))
+
+            Column(modifier = Modifier.weight(1f)) {
+                Text(
+                    text = item.webtoonTitle,
+                    style = MaterialTheme.typography.titleSmall,
+                    fontWeight = FontWeight.Bold,
+                    color = MaterialTheme.colorScheme.onSurface,
+                    maxLines = 1,
+                )
+
+                Text(
+                    text = item.chapterTitle,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    maxLines = 1,
+                )
+
+                Text(
+                    text = formatRelativeTime(item.lastRead, dateFormatPattern),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
+                )
+            }
         }
+        HorizontalDivider(
+            modifier = Modifier.padding(start = 80.dp),
+            color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f),
+        )
     }
 }
 
-fun formatRelativeTime(timestamp: Long): String {
+fun formatRelativeTime(timestamp: Long, dateFormatPattern: String = "MM/dd/yyyy"): String {
     val now = System.currentTimeMillis()
     val diff = now - timestamp
-    
+    val fallbackPattern = dateFormatPattern.ifBlank { "MM/dd/yyyy" }
+
     return when {
         diff < 60_000 -> "Just now"
         diff < 3600_000 -> "${diff / 60_000}m ago"
         diff < 86400_000 -> "${diff / 3600_000}h ago"
-        else -> SimpleDateFormat("MMM dd, yyyy", Locale.getDefault()).format(Date(timestamp))
+        else -> runCatching {
+            SimpleDateFormat(fallbackPattern, Locale.getDefault()).format(Date(timestamp))
+        }.getOrElse {
+            SimpleDateFormat("MM/dd/yyyy", Locale.getDefault()).format(Date(timestamp))
+        }
     }
 }
 

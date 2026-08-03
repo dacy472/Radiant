@@ -4,12 +4,18 @@ import android.os.Bundle
 import android.content.Context
 import android.content.IntentFilter
 import android.os.Build
-import androidx.activity.ComponentActivity
+import android.view.WindowManager
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.fragment.app.FragmentActivity
 import com.radiant.webtoon.core.receiver.ApkInstallReceiver
+import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.material.icons.Icons
@@ -17,6 +23,7 @@ import androidx.compose.material.icons.automirrored.filled.LibraryBooks
 import androidx.compose.material.icons.automirrored.filled.List
 import androidx.compose.material.icons.filled.Archive
 import androidx.compose.material.icons.filled.Extension
+import androidx.compose.material.icons.filled.Fingerprint
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Refresh
@@ -25,6 +32,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.ui.unit.dp
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -45,6 +53,13 @@ import com.radiant.webtoon.ui.updates.UpdatesViewModelFactory
 import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.compose.material3.NavigationBarItemDefaults
 import androidx.compose.material3.MaterialTheme
+import androidx.biometric.BiometricManager
+import androidx.biometric.BiometricPrompt
+import androidx.compose.ui.platform.LocalContext
+import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.compose.ui.platform.LocalLifecycleOwner
 
 
 sealed class Screen(val route: String, val title: String, val icon: ImageVector) {
@@ -56,7 +71,7 @@ sealed class Screen(val route: String, val title: String, val icon: ImageVector)
     object Settings : Screen("settings", "Settings", Icons.Filled.Settings)
 }
 
-class MainActivity : ComponentActivity() {
+class MainActivity : FragmentActivity() {
     private val installReceiver = ApkInstallReceiver()
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -65,7 +80,7 @@ class MainActivity : ComponentActivity() {
 
         val filter = IntentFilter(android.app.DownloadManager.ACTION_DOWNLOAD_COMPLETE)
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            registerReceiver(installReceiver, filter, Context.RECEIVER_EXPORTED)
+            registerReceiver(installReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
         } else {
             registerReceiver(installReceiver, filter)
         }
@@ -73,8 +88,27 @@ class MainActivity : ComponentActivity() {
         setContent {
             val app = remember { applicationContext as WebtoonApplication }
             val themeMode by app.settingsManager.themeMode.collectAsState(initial = "system")
+            val flagSecure by app.settingsManager.flagSecure.collectAsState(initial = false)
+            val requireBiometrics by app.settingsManager.requireBiometrics.collectAsState(initial = false)
+
+            DisposableEffect(flagSecure) {
+                if (flagSecure) {
+                    window.addFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                } else {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                }
+                onDispose {
+                    window.clearFlags(WindowManager.LayoutParams.FLAG_SECURE)
+                }
+            }
+
             WebtoonTheme(themeMode = themeMode) {
-                WebtoonApp()
+                BiometricLockGate(
+                    requireBiometrics = requireBiometrics,
+                    activity = this@MainActivity
+                ) {
+                    WebtoonApp()
+                }
             }
         }
     }
@@ -166,14 +200,15 @@ fun WebtoonApp() {
                     },
                     onUpdatesClick = {
                         navController.navigate("updates")
-                    }
+                    },
+                    onDownloadQueueClick = { navController.navigate("downloads_queue") },
                 )
             }
             composable(
                 route = "source/{sourceId}",
                 arguments = listOf(navArgument("sourceId") { type = NavType.StringType })
             ) { backStackEntry ->
-                val sourceId = backStackEntry.arguments?.getString("sourceId") ?: ""
+                val sourceId = decodeNav(backStackEntry.arguments?.getString("sourceId") ?: "")
                 com.radiant.webtoon.ui.source.SourceBrowseScreen(
                     extensionManager = extensionManager,
                     sourceId = sourceId,
@@ -191,17 +226,18 @@ fun WebtoonApp() {
                         navController.navigate("detail/${encodeNav(sourceId)}/${encodeNav(webtoonId)}")
                     },
                     onBrowseClick = { sourceId ->
-                        navController.navigate("source/$sourceId")
+                        navController.navigate("source/${encodeNav(sourceId)}")
                     },
                     onSearchClick = {
                         navController.navigate("global_search")
                     },
                     onWebViewClick = { url ->
-                        navController.navigate("webview/${encodeNav(url)}")
+                        navController.navigate("webview?url=${encodeNav(url)}")
                     },
                     onMigrateSourceClick = { sourceId ->
                         navController.navigate("migrate_list/${encodeNav(sourceId)}")
-                    }
+                    },
+                    onDownloadQueueClick = { navController.navigate("downloads_queue") },
                 )
             }
 
@@ -221,13 +257,26 @@ fun WebtoonApp() {
             }
 
             composable(
-                route = "webview/{url}",
-                arguments = listOf(navArgument("url") { type = NavType.StringType })
+                route = "webview?url={url}&sourceId={sourceId}",
+                arguments = listOf(
+                    navArgument("url") { type = NavType.StringType },
+                    navArgument("sourceId") {
+                        type = NavType.StringType
+                        nullable = true
+                        defaultValue = null
+                    }
+                )
             ) { backStackEntry ->
-                val encodedUrl = backStackEntry.arguments?.getString("url") ?: ""
-                val url = decodeNav(encodedUrl)
+                val url = decodeNav(backStackEntry.arguments?.getString("url") ?: "")
+                val webSourceId = backStackEntry.arguments?.getString("sourceId")?.let { decodeNav(it) }
+                val headers = remember(webSourceId) {
+                    webSourceId
+                        ?.let { extensionManager.getSource(it)?.getWebViewHeaders() }
+                        .orEmpty()
+                }
                 com.radiant.webtoon.ui.webview.WebViewScreen(
                     url = url,
+                    headers = headers,
                     onBackClick = { navController.popBackStack() }
                 )
             }
@@ -240,7 +289,8 @@ fun WebtoonApp() {
                     },
                     onChapterClick = { sourceId, webtoonId, chapterId, chapterTitle ->
                         navController.navigate("reader/${encodeNav(sourceId)}/${encodeNav(webtoonId)}/${encodeNav(chapterId)}?chapterTitle=${encodeNav(chapterTitle)}")
-                    }
+                    },
+                    onDownloadQueueClick = { navController.navigate("downloads_queue") },
                 )
             }
 
@@ -260,7 +310,7 @@ fun WebtoonApp() {
                         navController.navigate("detail/${encodeNav(sourceId)}/${encodeNav(webtoonId)}")
                     },
                     onBrowseClick = { sourceId ->
-                        navController.navigate("source/$sourceId")
+                        navController.navigate("source/${encodeNav(sourceId)}")
                     },
                     initialQuery = initialQuery,
                     migrateFromMangaId = migrateFromMangaId,
@@ -288,7 +338,7 @@ fun WebtoonApp() {
                         navController.navigate("reader/${encodeNav(sourceId)}/${encodeNav(webtoonId)}/${encodeNav(chapterId)}?chapterTitle=${encodeNav(chapterTitle)}")
                     },
                     onWebViewClick = { url ->
-                        navController.navigate("webview/${encodeNav(url)}")
+                        navController.navigate("webview?url=${encodeNav(url)}&sourceId=${encodeNav(sourceId)}")
                     }
                 )
             }
@@ -300,9 +350,13 @@ fun WebtoonApp() {
                     onReaderClick = { navController.navigate("settings/reader") },
                     onDownloadsClick = { navController.navigate("settings/downloads") },
                     onDownloadQueueClick = { navController.navigate("downloads_queue") },
+                    onBackupClick = { navController.navigate("settings/backup") },
+                    onStorageClick = { navController.navigate("settings/storage") },
+                    onTrackingClick = { navController.navigate("settings/tracking") },
                     onSecurityClick = { navController.navigate("settings/security") },
                     onAboutClick = { navController.navigate("settings/about") },
-                    onAdvancedClick = { navController.navigate("settings/advanced") }
+                    onAdvancedClick = { navController.navigate("settings/advanced") },
+                    onStatsClick = { navController.navigate("settings/stats") }
                 )
             }
             
@@ -323,7 +377,8 @@ fun WebtoonApp() {
                     },
                     onChapterClick = { sourceId, webtoonId, chapterId ->
                         navController.navigate("reader/${encodeNav(sourceId)}/${encodeNav(webtoonId)}/${encodeNav(chapterId)}?chapterTitle=Chapter")
-                    }
+                    },
+                    onDownloadQueueClick = { navController.navigate("downloads_queue") },
                 )
             }
 
@@ -331,8 +386,17 @@ fun WebtoonApp() {
             composable("settings/library") { com.radiant.webtoon.ui.settings.LibrarySettingsScreen(onBackClick = { navController.popBackStack() }) }
             composable("settings/reader") { com.radiant.webtoon.ui.settings.ReaderSettingsScreen(onBackClick = { navController.popBackStack() }) }
             composable("settings/downloads") { com.radiant.webtoon.ui.settings.DownloadsSettingsScreen(onBackClick = { navController.popBackStack() }) }
+            composable("settings/backup") { com.radiant.webtoon.ui.settings.BackupSettingsScreen(onBackClick = { navController.popBackStack() }) }
+            composable("settings/storage") { com.radiant.webtoon.ui.settings.StorageSettingsScreen(onBackClick = { navController.popBackStack() }) }
+            composable("settings/tracking") { com.radiant.webtoon.ui.settings.TrackingSettingsScreen(onBackClick = { navController.popBackStack() }) }
             composable("settings/security") { com.radiant.webtoon.ui.settings.SecuritySettingsScreen(onBackClick = { navController.popBackStack() }) }
             composable("settings/about") { com.radiant.webtoon.ui.settings.AboutSettingsScreen(onBackClick = { navController.popBackStack() }) }
+            composable("settings/stats") {
+                com.radiant.webtoon.ui.stats.ReadingStatsScreen(
+                    repository = repository,
+                    onBackClick = { navController.popBackStack() }
+                )
+            }
             
             composable("settings/advanced") {
                 com.radiant.webtoon.ui.settings.AdvancedSettingsScreen(
@@ -361,6 +425,125 @@ fun WebtoonApp() {
                     chapterTitle = chapterTitle.ifEmpty { "Chapter $chapterId" },
                     onBackClick = { navController.popBackStack() }
                 )
+            }
+        }
+    }
+}
+
+@Composable
+private fun BiometricLockGate(
+    requireBiometrics: Boolean,
+    activity: FragmentActivity,
+    content: @Composable () -> Unit
+) {
+    // Default unlocked — only lock when the setting is on AND biometrics are available.
+    // Avoids crash loops on emulators / devices without enrolled biometrics.
+    var isUnlocked by remember { mutableStateOf(true) }
+    var promptShown by remember { mutableStateOf(false) }
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    fun canUseBiometrics(): Boolean {
+        return try {
+            BiometricManager.from(activity)
+                .canAuthenticate(BiometricManager.Authenticators.BIOMETRIC_WEAK) ==
+                BiometricManager.BIOMETRIC_SUCCESS
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    LaunchedEffect(requireBiometrics) {
+        if (!requireBiometrics || !canUseBiometrics()) {
+            isUnlocked = true
+            promptShown = false
+        } else {
+            isUnlocked = false
+            promptShown = false
+        }
+    }
+
+    DisposableEffect(lifecycleOwner, requireBiometrics) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP && requireBiometrics && canUseBiometrics()) {
+                isUnlocked = false
+                promptShown = false
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    LaunchedEffect(requireBiometrics, isUnlocked, promptShown) {
+        if (requireBiometrics && !isUnlocked && !promptShown && canUseBiometrics()) {
+            promptShown = true
+            try {
+                val executor = ContextCompat.getMainExecutor(activity)
+                val prompt = BiometricPrompt(
+                    activity,
+                    executor,
+                    object : BiometricPrompt.AuthenticationCallback() {
+                        override fun onAuthenticationSucceeded(result: BiometricPrompt.AuthenticationResult) {
+                            isUnlocked = true
+                            promptShown = false
+                        }
+
+                        override fun onAuthenticationError(errorCode: Int, errString: CharSequence) {
+                            promptShown = false
+                            // If hardware/config errors, unlock so the app isn't bricked
+                            if (errorCode == BiometricPrompt.ERROR_HW_UNAVAILABLE ||
+                                errorCode == BiometricPrompt.ERROR_NO_BIOMETRICS ||
+                                errorCode == BiometricPrompt.ERROR_HW_NOT_PRESENT ||
+                                errorCode == BiometricPrompt.ERROR_VENDOR
+                            ) {
+                                isUnlocked = true
+                            }
+                        }
+                    }
+                )
+                val promptInfo = BiometricPrompt.PromptInfo.Builder()
+                    .setTitle("Unlock Radiant")
+                    .setSubtitle("Confirm your identity to continue")
+                    .setNegativeButtonText("Cancel")
+                    .build()
+                prompt.authenticate(promptInfo)
+            } catch (_: Exception) {
+                isUnlocked = true
+                promptShown = false
+            }
+        }
+    }
+
+    Box(modifier = Modifier.fillMaxSize()) {
+        // Always compose content so navigation state survives lock overlay
+        content()
+        if (requireBiometrics && !isUnlocked && canUseBiometrics()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(MaterialTheme.colorScheme.surface),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Icon(
+                        Icons.Default.Fingerprint,
+                        contentDescription = null,
+                        modifier = Modifier.padding(16.dp),
+                        tint = MaterialTheme.colorScheme.primary
+                    )
+                    Text("App locked", style = MaterialTheme.typography.titleLarge)
+                    Text(
+                        "Authenticate to continue",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(16.dp))
+                    TextButton(onClick = {
+                        promptShown = false
+                        isUnlocked = false
+                    }) {
+                        Text("Unlock")
+                    }
+                }
             }
         }
     }

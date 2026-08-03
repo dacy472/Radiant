@@ -2,21 +2,26 @@ package com.radiant.webtoon.core.service
 
 import android.content.Context
 import android.content.Intent
+import android.net.ConnectivityManager
+import android.net.NetworkCapabilities
 import android.net.Uri
 import android.os.Build
+import android.util.Log
 import androidx.documentfile.provider.DocumentFile
 import com.radiant.webtoon.core.database.DownloadStatus
 import com.radiant.webtoon.core.database.DownloadTask
 import com.radiant.webtoon.core.repository.WebtoonRepository
 import com.radiant.webtoon.core.settings.SettingsManager
+import eu.kanade.tachiyomi.network.NetworkHelper
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.firstOrNull
+import okhttp3.Request
+import uy.kohesive.injekt.injectLazy
 import kotlin.coroutines.coroutineContext
 import java.io.File
 import java.io.FileOutputStream
-import java.net.URL
 import kotlin.math.roundToInt
 
 class DownloadQueueManager(
@@ -26,6 +31,7 @@ class DownloadQueueManager(
 ) {
     private val scope = CoroutineScope(Dispatchers.IO + SupervisorJob())
     private var job: Job? = null
+    private val networkHelper: NetworkHelper by injectLazy()
 
     private val _activeDownloads = MutableStateFlow<List<DownloadTask>>(emptyList())
     val activeDownloads: StateFlow<List<DownloadTask>> = _activeDownloads
@@ -35,6 +41,14 @@ class DownloadQueueManager(
 
     private var isQueueRunning = false
     private var cancelCurrent = false
+
+    private fun isOnWifi(): Boolean {
+        val cm = context.getSystemService(Context.CONNECTIVITY_SERVICE) as ConnectivityManager
+        val network = cm.activeNetwork ?: return false
+        val caps = cm.getNetworkCapabilities(network) ?: return false
+        return caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) ||
+            caps.hasCapability(NetworkCapabilities.NET_CAPABILITY_NOT_METERED)
+    }
 
     init {
         // Start watching the queue
@@ -49,23 +63,55 @@ class DownloadQueueManager(
         _activeDownloads.value = queue
     }
 
+    data class DownloadRequest(
+        val chapterId: String,
+        val sourceId: String,
+        val webtoonId: String,
+        val webtoonTitle: String,
+        val chapterTitle: String
+    )
+
     fun addDownload(chapterId: String, sourceId: String, webtoonId: String, webtoonTitle: String, chapterTitle: String) {
-        scope.launch {
-            val existing = repository.getDownloadTask(chapterId, sourceId)
-            if (existing == null) {
-                val currentQueueSize = repository.getActiveDownloads().size
-                repository.addDownload(
-                    DownloadTask(
-                        chapterId = chapterId,
-                        sourceId = sourceId,
-                        webtoonId = webtoonId,
-                        webtoonTitle = webtoonTitle,
-                        chapterTitle = chapterTitle,
-                        orderIndex = currentQueueSize
-                    )
+        addDownloads(
+            listOf(
+                DownloadRequest(
+                    chapterId = chapterId,
+                    sourceId = sourceId,
+                    webtoonId = webtoonId,
+                    webtoonTitle = webtoonTitle,
+                    chapterTitle = chapterTitle
                 )
-            } else if (existing.status == DownloadStatus.PAUSED || existing.status == DownloadStatus.FAILED) {
-                repository.updateDownload(existing.copy(status = DownloadStatus.PENDING))
+            )
+        )
+    }
+
+    /**
+     * Enqueue many chapters in one pass with contiguous [DownloadTask.orderIndex]
+     * so the queue stays in the caller's order (e.g. chapter 1 → last).
+     */
+    fun addDownloads(requests: List<DownloadRequest>) {
+        if (requests.isEmpty()) return
+        scope.launch {
+            var nextIndex = repository.getActiveDownloads().size
+            for (req in requests) {
+                val existing = repository.getDownloadTask(req.chapterId, req.sourceId)
+                if (existing == null) {
+                    repository.addDownload(
+                        DownloadTask(
+                            chapterId = req.chapterId,
+                            sourceId = req.sourceId,
+                            webtoonId = req.webtoonId,
+                            webtoonTitle = req.webtoonTitle,
+                            chapterTitle = req.chapterTitle,
+                            orderIndex = nextIndex++
+                        )
+                    )
+                } else if (existing.status == DownloadStatus.PAUSED || existing.status == DownloadStatus.FAILED) {
+                    repository.updateDownload(existing.copy(status = DownloadStatus.PENDING, orderIndex = nextIndex++))
+                } else if (existing.status == DownloadStatus.COMPLETED) {
+                    // Already downloaded — skip
+                }
+                // PENDING / DOWNLOADING — already queued; leave as-is
             }
             refreshQueueState()
             startQueueIfIdle()
@@ -103,6 +149,8 @@ class DownloadQueueManager(
                 cancelCurrent = true
                 job?.cancelAndJoin()
             }
+            // Delete any partially/fully downloaded files so cancelling never leaves orphans.
+            repository.deleteDownloadFiles(task)
             repository.deleteDownload(chapterId, sourceId)
             refreshQueueState()
             startQueueIfIdle()
@@ -130,6 +178,12 @@ class DownloadQueueManager(
         job = scope.launch {
             isQueueRunning = true
             while (isActive) {
+                if (settingsManager.downloadOnlyOnWifi.firstOrNull() == true && !isOnWifi()) {
+                    Log.d(TAG, "WiFi-only enabled; pausing queue until unmetered connection")
+                    isQueueRunning = false
+                    break
+                }
+
                 val nextTask = repository.getNextPendingDownload()
                 if (nextTask == null) {
                     isQueueRunning = false
@@ -153,16 +207,26 @@ class DownloadQueueManager(
     }
 
     private suspend fun processDownload(task: DownloadTask) {
+        if (settingsManager.downloadOnlyOnWifi.firstOrNull() == true && !isOnWifi()) {
+            Log.d(TAG, "Not on WiFi; leaving ${task.chapterTitle} pending")
+            repository.updateDownload(task.copy(status = DownloadStatus.PENDING))
+            return
+        }
+
         repository.updateDownload(task.copy(status = DownloadStatus.DOWNLOADING, progress = 0))
         refreshQueueState()
 
         try {
             val pages = repository.getChapterPages(task.sourceId, task.chapterId)
+            if (pages.isEmpty()) {
+                repository.updateDownload(task.copy(status = DownloadStatus.FAILED))
+                return
+            }
             val total = pages.size
             repository.updateDownload(task.copy(status = DownloadStatus.DOWNLOADING, totalPages = total, progress = 0))
 
             val customUriStr = settingsManager.downloadLocationUri.firstOrNull()
-            
+
             val localPathStr: String = if (customUriStr != null) {
                 val baseDir = DocumentFile.fromTreeUri(context, Uri.parse(customUriStr))
                 val sourceDir = baseDir?.findFile(task.sourceId) ?: baseDir?.createDirectory(task.sourceId)
@@ -171,7 +235,7 @@ class DownloadQueueManager(
 
                 pages.forEachIndexed { index, url ->
                     if (cancelCurrent || !coroutineContext.isActive) throw CancellationException()
-                    
+
                     val startTime = System.currentTimeMillis()
                     val fileName = "${index + 1}.jpg"
                     var file = chapterDir.findFile(fileName)
@@ -183,7 +247,7 @@ class DownloadQueueManager(
                         if (file.length() > 0) {
                             // Skip download
                         } else {
-                            val bytes = downloadImageToUriMeasuring(url, file.uri)
+                            val bytes = downloadImageToUriMeasuring(url, file.uri, task.sourceId)
                             updateSpeed(bytes, System.currentTimeMillis() - startTime)
                         }
                     }
@@ -199,16 +263,16 @@ class DownloadQueueManager(
 
                 pages.forEachIndexed { index, url ->
                     if (cancelCurrent || !coroutineContext.isActive) throw CancellationException()
-                    
+
                     val targetFile = File(dir, "${index + 1}.jpg")
                     if (targetFile.exists() && targetFile.length() > 0) {
                         // Skip download logic
                     } else {
                         val startTime = System.currentTimeMillis()
-                        val bytes = downloadImageMeasuring(url, targetFile)
+                        val bytes = downloadImageMeasuring(url, targetFile, task.sourceId)
                         updateSpeed(bytes, System.currentTimeMillis() - startTime)
                     }
-                    
+
                     val progress = ((index + 1).toFloat() / total * 100).toInt()
                     repository.updateDownload(task.copy(progress = progress, downloadedPages = index + 1))
                     refreshQueueState()
@@ -230,21 +294,50 @@ class DownloadQueueManager(
         }
     }
 
-    private fun downloadImageToUriMeasuring(url: String, uri: Uri): Long {
+    /**
+     * Resolves the source's Referer/User-Agent headers for hotlink-protected page images —
+     * same requirement as covers (see WebtoonComponents.rememberSourceImageHeaders).
+     */
+    private fun headersFor(sourceId: String): Map<String, String> {
+        val source = repository.extensionManager.getSource(sourceId) ?: return emptyMap()
+        val headers = source.getWebViewHeaders().toMutableMap()
+        if (headers.keys.none { it.equals("Referer", ignoreCase = true) } && source.baseUrl.isNotBlank()) {
+            headers["Referer"] = source.baseUrl.trimEnd('/') + "/"
+        }
+        return headers
+    }
+
+    private fun buildImageRequest(url: String, sourceId: String): Request {
+        val builder = Request.Builder().url(url)
+        headersFor(sourceId).forEach { (key, value) -> builder.addHeader(key, value) }
+        return builder.build()
+    }
+
+    private fun downloadImageToUriMeasuring(url: String, uri: Uri, sourceId: String): Long {
         var totalBytes = 0L
-        context.contentResolver.openOutputStream(uri)?.use { output ->
-            URL(url).openStream().use { input ->
-                totalBytes = input.copyTo(output)
-            }
+        val request = buildImageRequest(url, sourceId)
+        networkHelper.client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) throw Exception("HTTP ${response.code}")
+            val body = response.body ?: throw Exception("Empty body")
+            context.contentResolver.openOutputStream(uri)?.use { output ->
+                body.byteStream().use { input ->
+                    totalBytes = input.copyTo(output)
+                }
+            } ?: throw Exception("Failed to open output stream")
         }
         return totalBytes
     }
 
-    private fun downloadImageMeasuring(url: String, file: File): Long {
+    private fun downloadImageMeasuring(url: String, file: File, sourceId: String): Long {
         var totalBytes = 0L
-        URL(url).openStream().use { input ->
+        val request = buildImageRequest(url, sourceId)
+        networkHelper.client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) throw Exception("HTTP ${response.code}")
+            val body = response.body ?: throw Exception("Empty body")
             FileOutputStream(file).use { output ->
-                totalBytes = input.copyTo(output)
+                body.byteStream().use { input ->
+                    totalBytes = input.copyTo(output)
+                }
             }
         }
         return totalBytes
@@ -265,5 +358,9 @@ class DownloadQueueManager(
         } else {
             context.startService(intent)
         }
+    }
+
+    companion object {
+        private const val TAG = "DownloadQueueManager"
     }
 }

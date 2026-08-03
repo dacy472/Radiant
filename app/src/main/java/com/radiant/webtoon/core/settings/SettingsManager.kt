@@ -34,7 +34,15 @@ class SettingsManager(private val context: Context) {
 
         val PINNED_SOURCES = stringSetPreferencesKey("pinned_sources")
 
+        val CROP_BORDERS = booleanPreferencesKey("crop_borders")
+        val READER_BG = stringPreferencesKey("reader_bg")
+        val INCOGNITO = booleanPreferencesKey("incognito")
+        val FLAG_SECURE = booleanPreferencesKey("flag_secure")
+        val LAST_LIBRARY_UPDATE = stringPreferencesKey("last_library_update")
+
         const val DEFAULT_REPO = "" // User will add their own repos
+
+        private val AUTO_UPDATE_FREQUENCIES = setOf("6h", "12h", "daily")
     }
 
     // Default repo URL
@@ -79,10 +87,17 @@ class SettingsManager(private val context: Context) {
         context.dataStore.edit { it[DATE_FORMAT] = format }
     }
 
-    // Library
-    val updateFrequency: Flow<String> = context.dataStore.data.map { it[UPDATE_FREQUENCY] ?: "daily" }
-    suspend fun setUpdateFrequency(freq: String) {
-        context.dataStore.edit { it[UPDATE_FREQUENCY] = freq }
+    // Library updates are manual-only (Updates tab pull-to-refresh).
+    val updateFrequency: Flow<String> = context.dataStore.data.map { it[UPDATE_FREQUENCY] ?: "manual" }
+
+    /** One-shot migration: older installs may still have 6h/12h/daily stored. */
+    suspend fun migrateAutoUpdateToManual() {
+        context.dataStore.edit { prefs ->
+            val current = prefs[UPDATE_FREQUENCY]
+            if (current == null || current in AUTO_UPDATE_FREQUENCIES) {
+                prefs[UPDATE_FREQUENCY] = "manual"
+            }
+        }
     }
 
     // Reader
@@ -145,5 +160,35 @@ class SettingsManager(private val context: Context) {
                 preferences[PINNED_SOURCES] = current + sourceId
             }
         }
+    }
+
+    // Reader extras
+    val cropBorders: Flow<Boolean> = context.dataStore.data.map { it[CROP_BORDERS] ?: false }
+    suspend fun setCropBorders(enabled: Boolean) {
+        context.dataStore.edit { it[CROP_BORDERS] = enabled }
+    }
+
+    val readerBg: Flow<String> = context.dataStore.data.map { it[READER_BG] ?: "black" }
+    suspend fun setReaderBg(bg: String) {
+        context.dataStore.edit { it[READER_BG] = bg }
+    }
+
+    val incognito: Flow<Boolean> = context.dataStore.data.map { it[INCOGNITO] ?: false }
+    /** Alias for Mihon-parity naming. */
+    val incognitoMode: Flow<Boolean> get() = incognito
+    suspend fun setIncognito(enabled: Boolean) {
+        context.dataStore.edit { it[INCOGNITO] = enabled }
+    }
+
+    val flagSecure: Flow<Boolean> = context.dataStore.data.map { it[FLAG_SECURE] ?: false }
+    suspend fun setFlagSecure(enabled: Boolean) {
+        context.dataStore.edit { it[FLAG_SECURE] = enabled }
+    }
+
+    val lastLibraryUpdate: Flow<Long> = context.dataStore.data.map {
+        it[LAST_LIBRARY_UPDATE]?.toLongOrNull() ?: 0L
+    }
+    suspend fun setLastLibraryUpdate(timestamp: Long) {
+        context.dataStore.edit { it[LAST_LIBRARY_UPDATE] = timestamp.toString() }
     }
 }

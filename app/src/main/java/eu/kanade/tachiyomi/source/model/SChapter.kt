@@ -1,5 +1,7 @@
 package eu.kanade.tachiyomi.source.model
 
+import kotlinx.serialization.json.JsonObject
+
 interface SChapter {
 
     var url: String
@@ -7,6 +9,12 @@ interface SChapter {
     var date_upload: Long
     var chapter_number: Float
     var scanlator: String?
+
+    /**
+     * Extra metadata associated with the chapter. Present for parity with modern
+     * Mihon/Keiyoushi extensions-lib; most extensions never touch this field.
+     */
+    var memo: JsonObject
 
     companion object {
         fun create(): SChapter = SChapterImpl()
@@ -19,4 +27,5 @@ class SChapterImpl : SChapter {
     override var date_upload: Long = 0
     override var chapter_number: Float = -1f
     override var scanlator: String? = null
+    override var memo: JsonObject = JsonObject(emptyMap())
 }

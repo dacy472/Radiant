@@ -12,17 +12,20 @@ import com.radiant.webtoon.WebtoonApplication
 import com.radiant.webtoon.core.repository.WebtoonRepository
 import com.radiant.webtoon.core.database.Chapter
 import com.radiant.webtoon.core.source.TachiyomiSourceAdapter
-import eu.kanade.tachiyomi.source.online.HttpSource
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import okhttp3.Headers
 import java.io.File
+import java.util.zip.ZipFile
 
 class ReaderViewModel(
     application: Application,
-    private val repository: WebtoonRepository
+    private val repository: WebtoonRepository,
 ) : AndroidViewModel(application) {
+    private val settingsManager = getApplication<WebtoonApplication>().settingsManager
+
     private val _pages = MutableStateFlow<List<String>>(emptyList())
     val pages: StateFlow<List<String>> = _pages
 
@@ -52,15 +55,81 @@ class ReaderViewModel(
 
     private var currentSourceId: String = ""
     private var currentWebtoonId: String = ""
+    var currentChapterId: String = ""
+        private set
 
-    fun setReadingMode(mode: Int) { _readingMode.value = mode.coerceIn(0, 2) }
+    init {
+        viewModelScope.launch {
+            settingsManager.readingDirection.collect { direction ->
+                _readingMode.value = when (direction) {
+                    "ltr" -> 1
+                    "rtl" -> 2
+                    else -> 0
+                }
+            }
+        }
+    }
+
+    fun setReadingMode(mode: Int) {
+        val coerced = mode.coerceIn(0, 2)
+        _readingMode.value = coerced
+        viewModelScope.launch {
+            val direction = when (coerced) {
+                1 -> "ltr"
+                2 -> "rtl"
+                else -> "vertical"
+            }
+            settingsManager.setReadingDirection(direction)
+        }
+    }
+
     fun setBackgroundColor(color: Color) { _backgroundColor.value = color }
     fun setCropBorders(crop: Boolean) { _cropBorders.value = crop }
+
+    fun markChapterReadWhenComplete(chapterId: String, webtoonId: String) {
+        viewModelScope.launch {
+            repository.markChapterRead(chapterId, webtoonId, true)
+
+            // Auto-delete downloaded chapter if enabled
+            if (settingsManager.autoDeleteRead.first()) {
+                val task = repository.getDownloadTask(chapterId, currentSourceId)
+                if (task?.status == com.radiant.webtoon.core.database.DownloadStatus.COMPLETED) {
+                    task.localPath?.let { path ->
+                        runCatching {
+                            val f = java.io.File(path)
+                            if (f.isDirectory) f.deleteRecursively() else f.delete()
+                        }
+                    }
+                    repository.deleteDownload(chapterId, currentSourceId)
+                }
+            }
+
+            // Sync AniList progress when tracked
+            try {
+                val app = getApplication<WebtoonApplication>()
+                val track = app.database.trackDao()
+                    .getForManga(webtoonId, currentSourceId)
+                    .firstOrNull { it.trackerId == "anilist" }
+                if (track != null) {
+                    val chapters = repository.getChaptersForManga(webtoonId)
+                    val chapter = chapters.find { it.url == chapterId }
+                    val number = chapter?.chapter_number?.toInt()?.coerceAtLeast(0) ?: 0
+                    if (number > 0) {
+                        app.trackerService.syncProgressChecked(track.remoteId, number)
+                        app.database.trackDao().insert(track.copy(lastChapter = number.toDouble()))
+                    }
+                }
+            } catch (_: Exception) {
+                // Tracking is best-effort
+            }
+        }
+    }
     // ────────────────────────────────────────────────────────────────────────
 
     fun loadChapter(sourceId: String, webtoonId: String, chapterId: String, chapterTitle: String) {
         currentSourceId = sourceId
         currentWebtoonId = webtoonId
+        currentChapterId = chapterId
         _isLoading.value = true
         
         viewModelScope.launch {
@@ -85,67 +154,38 @@ class ReaderViewModel(
             val app = getApplication<WebtoonApplication>()
             val source = app.extensionManager.getSource(sourceId)
             if (source is TachiyomiSourceAdapter) {
-                // Reach into the underlying HttpSource for its headers
-                val httpSource = source.javaClass.getDeclaredField("tachiyomiSource")
-                    .also { it.isAccessible = true }
-                    .get(source)
-                if (httpSource is HttpSource) {
-                    _sourceHeaders.value = httpSource.headers
-                }
+                _sourceHeaders.value = source.httpHeaders
             }
             try {
-                // Record Progress
+                // Record history / last-opened progress without marking the chapter fully read
                 repository.updateLastPageRead(chapterId, webtoonId, 0)
-                try {
-                    val detail = repository.getWebtoonDetail(sourceId, webtoonId)
-                    repository.markChapterReadLog(
-                        com.radiant.webtoon.core.database.History(
-                            chapter_id = chapterId,
-                            webtoon_id = webtoonId,
-                            source_id = sourceId,
-                            chapter_title = chapterTitle,
-                            webtoon_title = detail.title,
-                            webtoon_thumbnail = detail.thumbnail
+                val incognito = app.settingsManager.incognitoMode.first()
+                if (!incognito) {
+                    try {
+                        val detail = repository.getWebtoonDetail(sourceId, webtoonId)
+                        repository.logReadingHistory(
+                            com.radiant.webtoon.core.database.History(
+                                chapter_id = chapterId,
+                                webtoon_id = webtoonId,
+                                source_id = sourceId,
+                                chapter_title = chapterTitle,
+                                webtoon_title = detail.title,
+                                webtoon_thumbnail = detail.thumbnail
+                            )
                         )
-                    )
-                } catch (e: Exception) {
-                    repository.markChapterRead(chapterId, webtoonId, true)
+                    } catch (_: Exception) {
+                        // History write is best-effort
+                    }
                 }
-                
+
                 // Check for local download first
                 val download = repository.getDownloadTask(chapterId, sourceId)
                 if (download?.status == com.radiant.webtoon.core.database.DownloadStatus.COMPLETED && download.localPath != null) {
-                    val localPath = download.localPath
-                    
-                    if (localPath.startsWith("content://")) {
-                        // SAF custom folder
-                        val docFile = DocumentFile.fromTreeUri(getApplication(), Uri.parse(localPath))
-                        if (docFile != null && docFile.isDirectory) {
-                            val files = docFile.listFiles()
-                                .filter { it.name?.endsWith(".jpg") == true || it.name?.endsWith(".png") == true }
-                                .sortedBy { it.name?.substringBefore(".")?.toIntOrNull() ?: 0 }
-                                .map { it.uri.toString() }
-                                
-                            if (files.isNotEmpty()) {
-                                _pages.value = files
-                                _isLoading.value = false
-                                return@launch
-                            }
-                        }
-                    } else {
-                        // Legacy regular file folder
-                        val dir = File(localPath)
-                        if (dir.exists()) {
-                            val files = dir.listFiles { _, name -> name.endsWith(".jpg") || name.endsWith(".png") }
-                                ?.sortedBy { it.name.substringBefore(".").toIntOrNull() ?: 0 }
-                                ?.map { "file://${it.absolutePath}" }
-                            
-                            if (!files.isNullOrEmpty()) {
-                                _pages.value = files
-                                _isLoading.value = false
-                                return@launch
-                            }
-                        }
+                    val localPages = loadLocalPages(download.localPath)
+                    if (localPages.isNotEmpty()) {
+                        _pages.value = localPages
+                        _isLoading.value = false
+                        return@launch
                     }
                 }
 
@@ -156,6 +196,81 @@ class ReaderViewModel(
                 _pages.value = emptyList()
             }
             _isLoading.value = false
+        }
+    }
+
+    private fun loadLocalPages(localPath: String): List<String> {
+        if (localPath.startsWith("content://")) {
+            val docFile = DocumentFile.fromTreeUri(getApplication(), Uri.parse(localPath))
+            if (docFile != null && docFile.isDirectory) {
+                return docFile.listFiles()
+                    .filter { name ->
+                        val n = name.name?.lowercase() ?: return@filter false
+                        n.endsWith(".jpg") || n.endsWith(".jpeg") || n.endsWith(".png") || n.endsWith(".webp")
+                    }
+                    .sortedBy { it.name?.substringBeforeLast(".")?.filter { c -> c.isDigit() }?.toIntOrNull() ?: 0 }
+                    .map { it.uri.toString() }
+            }
+            return emptyList()
+        }
+
+        val file = File(localPath)
+        if (!file.exists()) return emptyList()
+
+        // CBZ / ZIP archive produced by ChapterDownloadWorker
+        if (file.isFile && (localPath.endsWith(".cbz", ignoreCase = true) || localPath.endsWith(".zip", ignoreCase = true))) {
+            return extractCbzToCache(file)
+        }
+
+        if (file.isDirectory) {
+            return file.listFiles { _, name ->
+                val n = name.lowercase()
+                n.endsWith(".jpg") || n.endsWith(".jpeg") || n.endsWith(".png") || n.endsWith(".webp")
+            }
+                ?.sortedBy { it.name.substringBeforeLast(".").filter { c -> c.isDigit() }.toIntOrNull() ?: 0 }
+                ?.map { "file://${it.absolutePath}" }
+                ?: emptyList()
+        }
+
+        return emptyList()
+    }
+
+    private fun extractCbzToCache(cbzFile: File): List<String> {
+        val cacheDir = File(getApplication<Application>().cacheDir, "cbz_pages/${cbzFile.nameWithoutExtension}")
+        if (!cacheDir.exists()) cacheDir.mkdirs()
+
+        // Reuse extracted pages when present
+        val existing = cacheDir.listFiles { _, name ->
+            val n = name.lowercase()
+            n.endsWith(".jpg") || n.endsWith(".jpeg") || n.endsWith(".png") || n.endsWith(".webp")
+        }
+            ?.sortedBy { it.name.substringBeforeLast(".").filter { c -> c.isDigit() }.toIntOrNull() ?: 0 }
+            ?.map { "file://${it.absolutePath}" }
+        if (!existing.isNullOrEmpty()) return existing
+
+        return try {
+            ZipFile(cbzFile).use { zip ->
+                zip.entries().asSequence()
+                    .filter { !it.isDirectory }
+                    .filter { entry ->
+                        val n = entry.name.lowercase()
+                        n.endsWith(".jpg") || n.endsWith(".jpeg") || n.endsWith(".png") || n.endsWith(".webp")
+                    }
+                    .sortedBy { it.name.substringAfterLast('/').substringBeforeLast(".").filter { c -> c.isDigit() }.toIntOrNull() ?: 0 }
+                    .mapIndexed { index, entry ->
+                        val ext = entry.name.substringAfterLast('.', "jpg")
+                        val outFile = File(cacheDir, String.format("%03d.%s", index + 1, ext))
+                        if (!outFile.exists() || outFile.length() == 0L) {
+                            zip.getInputStream(entry).use { input ->
+                                outFile.outputStream().use { output -> input.copyTo(output) }
+                            }
+                        }
+                        "file://${outFile.absolutePath}"
+                    }
+                    .toList()
+            }
+        } catch (e: Exception) {
+            emptyList()
         }
     }
 }

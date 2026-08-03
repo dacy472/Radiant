@@ -1,5 +1,7 @@
 package eu.kanade.tachiyomi.source.model
 
+import kotlinx.serialization.json.JsonObject
+
 interface SManga {
 
     var url: String
@@ -12,6 +14,12 @@ interface SManga {
     var thumbnail_url: String?
     var update_strategy: UpdateStrategy
     var initialized: Boolean
+
+    /**
+     * Extra metadata associated with the manga. Present for parity with modern
+     * Mihon/Keiyoushi extensions-lib; most extensions never touch this field.
+     */
+    var memo: JsonObject
 
     companion object {
         const val UNKNOWN = 0
@@ -37,4 +45,5 @@ class SMangaImpl : SManga {
     override var thumbnail_url: String? = null
     override var update_strategy: UpdateStrategy = UpdateStrategy.ALWAYS_UPDATE
     override var initialized: Boolean = false
+    override var memo: JsonObject = JsonObject(emptyMap())
 }

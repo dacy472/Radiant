@@ -255,7 +255,8 @@ fun SearchScreen(
                                                             } else {
                                                                 onWebtoonClick(source.id, webtoon.id)
                                                             }
-                                                        }
+                                                        },
+                                                        sourceId = source.id
                                                     )
                                                 }
                                             }

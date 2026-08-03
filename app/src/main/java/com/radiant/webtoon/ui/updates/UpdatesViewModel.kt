@@ -5,13 +5,13 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.WorkManager
 import com.radiant.webtoon.core.database.UpdateItem
 import com.radiant.webtoon.core.repository.WebtoonRepository
-import com.radiant.webtoon.core.service.UpdateWorker
+import com.radiant.webtoon.core.service.LibraryUpdateWorker
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 
 class UpdatesViewModel(
@@ -38,14 +38,18 @@ class UpdatesViewModel(
     }
 
     fun refreshManually() {
+        if (_isRefreshing.value) return
         _isRefreshing.value = true
-        val request = OneTimeWorkRequestBuilder<com.radiant.webtoon.core.service.LibraryUpdateWorker>().build()
-        WorkManager.getInstance(getApplication()).enqueue(request)
-        
-        // Wait briefly for UI to show feedback
+        val workManager = WorkManager.getInstance(getApplication())
+        LibraryUpdateWorker.triggerManualUpdate(getApplication())
+
         viewModelScope.launch {
-            kotlinx.coroutines.delay(1000)
-            _isRefreshing.value = false
+            try {
+                workManager.getWorkInfosForUniqueWorkFlow(LibraryUpdateWorker.MANUAL_WORK_NAME)
+                    .first { infos -> infos.isNotEmpty() && infos.all { it.state.isFinished } }
+            } finally {
+                _isRefreshing.value = false
+            }
         }
     }
 }

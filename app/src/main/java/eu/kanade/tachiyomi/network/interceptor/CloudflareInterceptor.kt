@@ -2,127 +2,134 @@ package eu.kanade.tachiyomi.network.interceptor
 
 import android.annotation.SuppressLint
 import android.content.Context
+import android.os.Handler
+import android.os.Looper
 import android.webkit.CookieManager
 import android.webkit.WebSettings
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import eu.kanade.tachiyomi.network.AndroidCookieJar
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.runBlocking
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import okhttp3.Cookie
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.Interceptor
 import okhttp3.Request
 import okhttp3.Response
-import okhttp3.Protocol
-import okhttp3.ResponseBody.Companion.toResponseBody
+import java.io.IOException
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicReference
 
 class CloudflareInterceptor(
     private val context: Context,
     private val cookieJar: AndroidCookieJar? = null
 ) : Interceptor {
 
+    private val mainHandler = Handler(Looper.getMainLooper())
+
     override fun intercept(chain: Interceptor.Chain): Response {
         val request = chain.request()
-        try {
-            val response = chain.proceed(request)
+        val response = chain.proceed(request)
 
-            // Only intercept if Cloudflare is blocking us with a 403 or 503
-            if (response.code in listOf(403, 503) &&
-                response.header("Server")?.startsWith("cloudflare", ignoreCase = true) == true
-            ) {
-                response.close()
-                return resolveWithWebView(request, chain)
+        // Only intercept if Cloudflare is blocking us with a 403 or 503
+        if (response.code in listOf(403, 503) &&
+            response.header("Server")?.startsWith("cloudflare", ignoreCase = true) == true
+        ) {
+            response.close()
+            // Serialize WebView bypass — parallel global search must not spawn many WebViews
+            return runBlocking {
+                bypassMutex.withLock {
+                    resolveWithWebView(request, chain)
+                }
             }
-
-            return response
-        } catch (e: Exception) {
-            // Prevent app crash on timeout
-            return Response.Builder()
-                .request(request)
-                .protocol(Protocol.HTTP_1_1)
-                .code(503)
-                .message("Cloudflare bypass failed or timed out: ${e.message}")
-                .body("".toResponseBody(null))
-                .build()
         }
+
+        return response
     }
 
     @SuppressLint("SetJavaScriptEnabled")
-    private fun resolveWithWebView(request: Request, chain: Interceptor.Chain): Response = runBlocking {
-        val latch = CountDownLatch(1)
-        var webViewRef: WebView? = null
-
-        try {
-            withContext(Dispatchers.Main) {
-                val webView = WebView(context.applicationContext)
-                webViewRef = webView
-
-                // Mirror the request User-Agent so Cloudflare sees the same agent OkHttp sends
-                val userAgent = request.header("User-Agent")
-                    ?: WebSettings.getDefaultUserAgent(context)
-
-                webView.settings.apply {
-                    javaScriptEnabled = true
-                    domStorageEnabled = true
-                    userAgentString = userAgent
-                    databaseEnabled = true
-                    // Allow mixed content — some CF challenges load resources over HTTP
-                    @Suppress("DEPRECATION")
-                    mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
-                }
-
-                webView.webViewClient = object : WebViewClient() {
-                    override fun onPageFinished(view: WebView, url: String) {
-                        super.onPageFinished(view, url)
-
-                        // Check if cf_clearance cookie is now present
-                        val cookies = CookieManager.getInstance().getCookie(url)
-                        if (!cookies.isNullOrBlank() && cookies.contains("cf_clearance")) {
-                            // Bridge WebView cookies into our AndroidCookieJar
-                            syncWebViewCookiesToJar(url, cookies)
-                            latch.countDown()
-                        }
-                    }
-                }
-
-                // Ensure the system CookieManager is synced with WebView
-                CookieManager.getInstance().setAcceptCookie(true)
-                CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
-
-                webView.loadUrl(request.url.toString())
-            }
-
-            // Wait up to 5 seconds for Cloudflare challenge to resolve
-            val resolved = latch.await(5, TimeUnit.SECONDS)
-
-            if (!resolved) {
-                throw java.io.IOException("Cloudflare bypass timed out for ${request.url}")
-            }
-        } catch (e: Exception) {
-            throw java.io.IOException("Failed to bypass Cloudflare: ${e.message}", e)
-        } finally {
-            // Cleanup WebView on Main thread
-            withContext(Dispatchers.Main) {
-                webViewRef?.apply {
-                    stopLoading()
-                    destroy()
-                }
-            }
+    private fun resolveWithWebView(request: Request, chain: Interceptor.Chain): Response {
+        // Already cleared? Skip WebView and retry immediately
+        val existing = try {
+            CookieManager.getInstance().getCookie(request.url.toString())
+        } catch (_: Exception) {
+            null
+        }
+        if (!existing.isNullOrBlank() && existing.contains("cf_clearance")) {
+            syncWebViewCookiesToJar(request.url.toString(), existing)
+            return chain.proceed(request.newBuilder().build())
         }
 
-        // Retry the original request — AndroidCookieJar now holds cf_clearance
-        val newRequest = request.newBuilder().build()
-        chain.proceed(newRequest)
+        val latch = CountDownLatch(1)
+        val webViewRef = AtomicReference<WebView?>(null)
+        val setupError = AtomicReference<Exception?>(null)
+
+        try {
+            mainHandler.post {
+                try {
+                    val webView = WebView(context.applicationContext)
+                    webViewRef.set(webView)
+
+                    val userAgent = request.header("User-Agent")
+                        ?: WebSettings.getDefaultUserAgent(context)
+
+                    webView.settings.apply {
+                        javaScriptEnabled = true
+                        domStorageEnabled = true
+                        userAgentString = userAgent
+                        databaseEnabled = true
+                        @Suppress("DEPRECATION")
+                        mixedContentMode = android.webkit.WebSettings.MIXED_CONTENT_ALWAYS_ALLOW
+                    }
+
+                    webView.webViewClient = object : WebViewClient() {
+                        override fun onPageFinished(view: WebView, url: String) {
+                            super.onPageFinished(view, url)
+                            val cookies = CookieManager.getInstance().getCookie(url)
+                            if (!cookies.isNullOrBlank() && cookies.contains("cf_clearance")) {
+                                syncWebViewCookiesToJar(url, cookies)
+                                latch.countDown()
+                            }
+                        }
+                    }
+
+                    CookieManager.getInstance().setAcceptCookie(true)
+                    CookieManager.getInstance().setAcceptThirdPartyCookies(webView, true)
+                    webView.loadUrl(request.url.toString())
+                } catch (e: Exception) {
+                    setupError.set(e)
+                    latch.countDown()
+                }
+            }
+
+            val resolved = latch.await(25, TimeUnit.SECONDS)
+            setupError.get()?.let { throw it }
+
+            if (!resolved) {
+                throw IOException("Cloudflare bypass timed out for ${request.url}")
+            }
+        } catch (e: Exception) {
+            throw IOException("Failed to bypass Cloudflare: ${e.message}", e)
+        } finally {
+            val destroyLatch = CountDownLatch(1)
+            mainHandler.post {
+                try {
+                    webViewRef.get()?.apply {
+                        stopLoading()
+                        destroy()
+                    }
+                } finally {
+                    destroyLatch.countDown()
+                }
+            }
+            destroyLatch.await(5, TimeUnit.SECONDS)
+        }
+
+        return chain.proceed(request.newBuilder().build())
     }
 
-    /**
-     * Parses raw cookie strings from the WebView's CookieManager and saves them
-     * into the AndroidCookieJar so that OkHttp picks them up on the retry.
-     */
     private fun syncWebViewCookiesToJar(urlString: String, rawCookies: String) {
         if (cookieJar == null) return
 
@@ -134,9 +141,12 @@ class CloudflareInterceptor(
             if (cookies.isNotEmpty()) {
                 cookieJar.saveFromResponse(httpUrl, cookies)
             }
-        } catch (e: Exception) {
-            // Best-effort — if cookie bridging fails the retry may still work
-            // via the system CookieManager if using WebViewCookieJar
+        } catch (_: Exception) {
+            // Best-effort cookie bridge
         }
+    }
+
+    companion object {
+        private val bypassMutex = Mutex()
     }
 }

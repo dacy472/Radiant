@@ -9,20 +9,13 @@ import com.google.gson.GsonBuilder
 import com.google.gson.JsonDeserializer
 import com.google.gson.annotations.SerializedName
 import dalvik.system.DexClassLoader
-import dalvik.system.PathClassLoader
 import eu.kanade.tachiyomi.network.NetworkHelper
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.*
 import uy.kohesive.injekt.injectLazy
-import eu.kanade.tachiyomi.source.CatalogueSource
 import eu.kanade.tachiyomi.source.Source as TachiyomiSource
-import eu.kanade.tachiyomi.source.online.HttpSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import okhttp3.OkHttpClient
 import okhttp3.Request
 import java.io.File
-import java.util.concurrent.TimeUnit
 
 /**
  * Handles:
@@ -51,6 +44,9 @@ class ExtensionLoader(private val context: Context) {
 
     private val client by lazy { networkHelper.client }
 
+    /** Retained so extension Source instances stay valid after GC. */
+    private val classLoaders = java.util.concurrent.ConcurrentHashMap<String, ClassLoader>()
+
     private val apkDownloadDir: File
         get() {
             val dir = File(context.cacheDir, "extension_apks")
@@ -61,6 +57,14 @@ class ExtensionLoader(private val context: Context) {
     val extensionsDir: File
         get() {
             val dir = File(context.filesDir, "extensions")
+            if (!dir.exists()) dir.mkdirs()
+            return dir
+        }
+
+    /** Read-only APK copies for DexClassLoader (Android 14+ rejects writable dex paths). */
+    private val readOnlyApkDir: File
+        get() {
+            val dir = File(context.codeCacheDir, "ext_apk")
             if (!dir.exists()) dir.mkdirs()
             return dir
         }
@@ -91,6 +95,7 @@ class ExtensionLoader(private val context: Context) {
 
         // Fallback to index.json if index.min.json fails
         if (!response.isSuccessful && url.endsWith("index.min.json")) {
+            response.close()
             url = url.replace("index.min.json", "index.json")
             Log.d(tag, "Fallback fetching repo index from: $url")
             request = Request.Builder()
@@ -100,20 +105,22 @@ class ExtensionLoader(private val context: Context) {
             response = client.newCall(request).execute()
         }
 
-        if (!response.isSuccessful) {
-            throw Exception("Failed to fetch repo index: HTTP ${response.code}")
-        }
+        response.use { resp ->
+            if (!resp.isSuccessful) {
+                throw Exception("Failed to fetch repo index: HTTP ${resp.code}")
+            }
 
-        val body = response.body?.string() ?: throw Exception("Empty response body")
-        val trimmedBody = body.trimStart()
+            val body = resp.body?.string() ?: throw Exception("Empty response body")
+            val trimmedBody = body.trimStart()
 
-        if (trimmedBody.startsWith("[")) {
-            // Direct array of extensions
-            val listType = object : com.google.gson.reflect.TypeToken<List<RepoExtensionEntry>>() {}.type
-            val extensions: List<RepoExtensionEntry> = gson.fromJson(trimmedBody, listType)
-            RepoIndex(name = "Imported Repository", description = "", extensions = extensions)
-        } else {
-            gson.fromJson(trimmedBody, RepoIndex::class.java)
+            if (trimmedBody.startsWith("[")) {
+                // Direct array of extensions
+                val listType = object : com.google.gson.reflect.TypeToken<List<RepoExtensionEntry>>() {}.type
+                val extensions: List<RepoExtensionEntry> = gson.fromJson(trimmedBody, listType)
+                RepoIndex(name = "Imported Repository", description = "", extensions = extensions)
+            } else {
+                gson.fromJson(trimmedBody, RepoIndex::class.java)
+            }
         }
     }
 
@@ -137,23 +144,23 @@ class ExtensionLoader(private val context: Context) {
         Log.d(tag, "Downloading extension APK: ${entry.name} from $downloadUrl")
 
         val request = Request.Builder().url(downloadUrl).build()
-        val response = client.newCall(request).execute()
-
-        if (!response.isSuccessful) {
-            throw Exception("Failed to download extension: HTTP ${response.code}")
-        }
-
-        val localFile = File(apkDownloadDir, fileName)
-        response.body?.let { body ->
-            localFile.outputStream().use { out ->
-                body.byteStream().use { input ->
-                    input.copyTo(out)
-                }
+        client.newCall(request).execute().use { response ->
+            if (!response.isSuccessful) {
+                throw Exception("Failed to download extension: HTTP ${response.code}")
             }
-        } ?: throw Exception("Empty response body")
 
-        Log.d(tag, "Extension APK saved to: ${localFile.absolutePath}")
-        localFile
+            val localFile = File(apkDownloadDir, fileName)
+            response.body?.let { body ->
+                localFile.outputStream().use { out ->
+                    body.byteStream().use { input ->
+                        input.copyTo(out)
+                    }
+                }
+            } ?: throw Exception("Empty response body")
+
+            Log.d(tag, "Extension APK saved to: ${localFile.absolutePath}")
+            localFile
+        }
     }
 
     /**
@@ -177,8 +184,9 @@ class ExtensionLoader(private val context: Context) {
             setMimeType("application/vnd.android.package-archive")
         }
         
-        downloadManager.enqueue(request)
-        Log.i(tag, "Enqueued extension download with manager: ${entry.name}")
+        val downloadId = downloadManager.enqueue(request)
+        com.radiant.webtoon.core.receiver.ApkInstallReceiver.trackDownload(downloadId)
+        Log.i(tag, "Enqueued extension download with manager: ${entry.name} id=$downloadId")
     }
 
     // ─── APK Scanning (PackageManager) ───
@@ -293,16 +301,60 @@ class ExtensionLoader(private val context: Context) {
     fun deleteLocalExtension(packageName: String): Boolean {
         val file = File(extensionsDir, "$packageName.apk")
         if (file.exists()) {
+            // Read-only files cannot be deleted on some devices
+            file.setWritable(true)
             val deleted = file.delete()
             if (deleted) {
                 Log.i(tag, "Deleted local extension APK: $packageName")
-                // Also clean up any optimized dex files if they exist
-                val dexDir = File(context.codeCacheDir, "ext_$packageName")
-                if (dexDir.exists()) dexDir.deleteRecursively()
+                invalidateLoadedExtension(packageName)
                 return true
             }
         }
         return false
+    }
+
+    /** Drop cached ClassLoader and read-only APK copy so the next load uses a fresh file. */
+    fun invalidateLoadedExtension(packageName: String) {
+        classLoaders.remove(packageName)
+        val dexDir = File(context.codeCacheDir, "ext_$packageName")
+        if (dexDir.exists()) dexDir.deleteRecursively()
+        val cachedApk = File(readOnlyApkDir, "$packageName.apk")
+        if (cachedApk.exists()) {
+            cachedApk.setWritable(true)
+            cachedApk.delete()
+        }
+    }
+
+    /**
+     * Android 14+ (targetSdk 34+) forbids loading DEX from a writable path.
+     * System-installed APKs are already non-writable; local copies under filesDir are not.
+     * Sync a read-only copy into codeCacheDir and return that path for DexClassLoader.
+     */
+    private fun prepareReadOnlyDexPath(apkPath: String, packageName: String): String {
+        val source = File(apkPath)
+        if (!source.exists()) {
+            throw IllegalArgumentException("Extension APK missing: $apkPath")
+        }
+
+        // Already non-writable (typical for /data/app system packages) — load in place
+        if (!source.canWrite()) {
+            return apkPath
+        }
+
+        val dest = File(readOnlyApkDir, "$packageName.apk")
+        val needsCopy = !dest.exists() ||
+            dest.length() != source.length() ||
+            dest.lastModified() < source.lastModified()
+
+        if (needsCopy) {
+            if (dest.exists()) dest.setWritable(true)
+            source.copyTo(dest, overwrite = true)
+        }
+
+        if (!dest.setReadOnly()) {
+            Log.w(tag, "Failed to mark extension APK read-only: ${dest.absolutePath}")
+        }
+        return dest.absolutePath
     }
 
     private fun parseExtensionPackage(pm: PackageManager, pkgInfo: PackageInfo): ExtensionInfo? {
@@ -359,18 +411,24 @@ class ExtensionLoader(private val context: Context) {
      */
     fun loadExtensionSources(extInfo: ExtensionInfo): List<TachiyomiSource> {
         val isLocal = extInfo.apkPath.startsWith(context.filesDir.absolutePath)
-        Log.e("RADIANT_DEBUG", "Attempting to load APK: ${extInfo.apkPath} | Exists: ${java.io.File(extInfo.apkPath).exists()} | IsLocal: $isLocal")
-        
-        val classLoader = if (isLocal) {
-            // Use DexClassLoader for local files to allow optimized dex storage in codeCacheDir
-            val optimizedDir = File(context.codeCacheDir, "ext_${extInfo.packageName}").apply { if (!exists()) mkdirs() }
-            DexClassLoader(extInfo.apkPath, optimizedDir.absolutePath, null, this::class.java.classLoader)
-        } else {
-            PathClassLoader(extInfo.apkPath, null, this::class.java.classLoader)
+        Log.d(tag, "Loading APK: ${extInfo.apkPath} exists=${File(extInfo.apkPath).exists()} local=$isLocal")
+
+        // Always use DexClassLoader with a retained instance so loaded Sources stay valid.
+        // Local APKs under filesDir are writable — Android 14+ rejects those as dex paths.
+        val classLoader = classLoaders.getOrPut(extInfo.packageName) {
+            val dexPath = prepareReadOnlyDexPath(extInfo.apkPath, extInfo.packageName)
+            val optimizedDir = File(context.codeCacheDir, "ext_${extInfo.packageName}").apply {
+                if (!exists()) mkdirs()
+            }
+            Log.d(tag, "DexClassLoader path for ${extInfo.packageName}: $dexPath")
+            DexClassLoader(
+                dexPath,
+                optimizedDir.absolutePath,
+                null,
+                this::class.java.classLoader
+            )
         }
-        
-        Log.e("RADIANT_DEBUG", "ClassLoader initialized with parent: ${this::class.java.classLoader.javaClass.simpleName}")
-        
+
         val sources = mutableListOf<TachiyomiSource>()
 
         // The source class names may be comma-separated
@@ -385,24 +443,18 @@ class ExtensionLoader(private val context: Context) {
                     className
                 }
 
-                Log.e("RADIANT_DEBUG", "Attempting to instantiate class: $fullClassName")
+                Log.d(tag, "Instantiating class: $fullClassName")
                 val clazz = Class.forName(fullClassName, false, classLoader)
-                Log.d(tag, "Loaded class: $fullClassName")
 
                 // Check if it's a Kotlin object (has INSTANCE field)
                 val instance = try {
                     val instanceField = clazz.getDeclaredField("INSTANCE")
-                    instanceField.setAccessible(true)
-                    val inst = instanceField.get(null)
-                    Log.e("RADIANT_DEBUG", "Successfully instantiated via INSTANCE: $fullClassName")
-                    inst
+                    instanceField.isAccessible = true
+                    instanceField.get(null)
                 } catch (e: Exception) {
                     try {
-                        val inst = clazz.getDeclaredConstructor().newInstance()
-                        Log.e("RADIANT_DEBUG", "Successfully instantiated via constructor: $fullClassName")
-                        inst
+                        clazz.getDeclaredConstructor().newInstance()
                     } catch (e2: Exception) {
-                        Log.e("RADIANT_DEBUG", "ClassLoader CRASHED for $fullClassName: ${e2.message}", e2)
                         Log.e(tag, "Failed to instantiate class: $fullClassName. No public constructor or INSTANCE found.", e2)
                         continue
                     }
@@ -420,7 +472,7 @@ class ExtensionLoader(private val context: Context) {
                     Log.d(tag, "Class $fullClassName identifies as a Source")
                     val source = instance as? TachiyomiSource ?: instance as? eu.kanade.tachiyomi.source.Source
                     if (source != null) {
-                        Log.e("RADIANT_DEBUG", "Successfully loaded Source: ${source.name}")
+                        Log.d(tag, "Loaded Source: ${source.name}")
                         sources.add(source)
                     }
                 } else if (isSourceFactory) {
@@ -433,32 +485,30 @@ class ExtensionLoader(private val context: Context) {
                                 is Array<*> -> rawSources.filterIsInstance<TachiyomiSource>()
                                 else -> emptyList()
                             }
-                            
+
                             if (factorySources.isEmpty() && rawSources is List<*>) {
                                 // Fallback: try to add them if they look like sources even if cast fails
                                 for (item in rawSources) {
                                     if (item != null && isSourceByName(item.javaClass)) {
-                                        (item as? TachiyomiSource)?.let { 
-                                            sources.add(it) 
+                                        (item as? TachiyomiSource)?.let {
+                                            sources.add(it)
                                         }
                                     }
                                 }
                             } else {
                                 factorySources.forEach { source ->
-                                    Log.e("RADIANT_DEBUG", "Successfully loaded Source: ${source.name} (from factory)")
+                                    Log.d(tag, "Loaded Source: ${source.name} (from factory)")
                                     sources.add(source)
                                 }
                             }
                         }
                     } catch (e: Exception) {
-                        Log.e("RADIANT_DEBUG", "ClassLoader CRASHED for $fullClassName (Factory): ${e.message}", e)
                         Log.e(tag, "Failed to invoke createSources on $fullClassName", e)
                     }
                 } else {
                     Log.w(tag, "Class $fullClassName does NOT appear to be a Source or SourceFactory. Interfaces: ${clazz.interfaces.joinToString { it.name }}")
                 }
             } catch (e: Exception) {
-                Log.e("RADIANT_DEBUG", "Unexpected error loading source class $className: ${e.message}", e)
                 Log.e(tag, "Unexpected error loading source class $className", e)
             }
         }
@@ -503,6 +553,7 @@ data class RepoExtensionEntry(
     @SerializedName("lang") val lang: String? = "en",
     @SerializedName("icon") val icon: String? = "🌐",
     @SerializedName("version") val version: String? = "1.0.0",
+    @SerializedName("versionCode") val versionCode: Long = 0,
     @SerializedName(value = "fileName", alternate = ["apk"]) val fileName: String,
     @SerializedName(value = "nsfw", alternate = ["isNsfw"]) val nsfw: Int = 0,
     @SerializedName("description") val description: String? = null,

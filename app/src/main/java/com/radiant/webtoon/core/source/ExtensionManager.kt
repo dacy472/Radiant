@@ -20,9 +20,13 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import uy.kohesive.injekt.injectLazy
 import eu.kanade.tachiyomi.network.NetworkHelper
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Manager responsible for the full extension lifecycle:
@@ -47,31 +51,7 @@ class ExtensionManager(
     private val _installedExtensions = MutableStateFlow<List<Source>>(emptyList())
     val installedExtensions: StateFlow<List<Source>> = _installedExtensions
 
-    init {
-        // Trigger initial background load immediately upon startup
-        scope.launch(Dispatchers.IO) {
-            loadInstalledExtensions()
-        }
-        
-        // Dynamically track pins
-        scope.launch(Dispatchers.IO) {
-            settingsManager.pinnedSources.collect { pinnedIds ->
-                sourceRegistry.values.forEach { source ->
-                    source.isPinned = pinnedIds.contains(source.id)
-                }
-                
-                // Force StateFlow update so UI recomposes
-                val currents = _installedExtensions.value
-                if (currents.isNotEmpty()) {
-                    _installedExtensions.value = currents.toList() // trigger recomposition
-                }
-            }
-        }
-    }
-
-    suspend fun togglePin(sourceId: String) {
-        settingsManager.togglePinnedSource(sourceId)
-    }
+    private val _hideNsfw = MutableStateFlow(true)
 
     // Available extensions from all repos (not yet installed)
     private val _availableExtensions = MutableStateFlow<List<RepoExtensionEntry>>(emptyList())
@@ -82,7 +62,9 @@ class ExtensionManager(
     val installedExtensionInfos: StateFlow<List<ExtensionInfo>> = _installedExtensionInfos
 
     // Dedicated source registry for reliable instance retrieval
-    private val sourceRegistry = mutableMapOf<String, Source>()
+    private val sourceRegistry = ConcurrentHashMap<String, Source>()
+    private val loadMutex = Mutex()
+    private val isRefreshingRepos = AtomicBoolean(false)
 
     private val _installedCount = MutableStateFlow(0)
     val installedCount: StateFlow<Int> = _installedCount
@@ -92,7 +74,62 @@ class ExtensionManager(
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading
 
+    private val _isRepoRefreshing = MutableStateFlow(false)
+
     private val _trustedPackages = MutableStateFlow<Set<String>>(emptySet())
+
+    private companion object {
+        const val DEFAULT_REPO_URL =
+            "https://cdn.jsdelivr.net/gh/keiyoushi/extensions@repo/index.min.json"
+
+        /** Multi-lang ("all") packs are allowed; they include English sources. */
+        private val ENABLED_EXTENSION_LANGS = setOf("en", "all")
+        private val ENABLED_SOURCE_LANGS = setOf("en")
+    }
+
+    fun isExtensionLanguageEnabled(lang: String?): Boolean {
+        val normalized = lang?.lowercase()?.trim().orEmpty()
+        return normalized.isEmpty() || normalized in ENABLED_EXTENSION_LANGS
+    }
+
+    fun isSourceLanguageEnabled(lang: String): Boolean {
+        val normalized = lang.lowercase().trim()
+        return normalized.isEmpty() || normalized in ENABLED_SOURCE_LANGS
+    }
+
+    // init MUST run after all StateFlows above — launching earlier races and NPEs on _isLoading
+    init {
+        scope.launch(Dispatchers.IO) {
+            loadInstalledExtensions()
+        }
+
+        scope.launch(Dispatchers.IO) {
+            settingsManager.nsfwFilter.collect { filterEnabled ->
+                _hideNsfw.value = filterEnabled
+                val currents = _installedExtensions.value
+                if (currents.isNotEmpty()) {
+                    _installedExtensions.value = currents.toList()
+                }
+            }
+        }
+
+        scope.launch(Dispatchers.IO) {
+            settingsManager.pinnedSources.collect { pinnedIds ->
+                sourceRegistry.values.forEach { source ->
+                    source.isPinned = pinnedIds.contains(source.id)
+                }
+
+                val currents = _installedExtensions.value
+                if (currents.isNotEmpty()) {
+                    _installedExtensions.value = currents.toList()
+                }
+            }
+        }
+    }
+
+    suspend fun togglePin(sourceId: String) {
+        settingsManager.togglePinnedSource(sourceId)
+    }
 
     // ─── Repository management ───
 
@@ -140,14 +177,21 @@ class ExtensionManager(
             }
         }
 
+        // Prevent overlapping refreshes (was causing infinite load/scroll loops)
+        if (!isRefreshingRepos.compareAndSet(false, true)) {
+            Log.d(tag, "Repo refresh already in progress, skipping")
+            return
+        }
+
         // Step B & C: Launch background coroutine to fetch live URL, cache it, and emit it
         scope.launch(Dispatchers.IO) {
+            _isRepoRefreshing.value = true
             _isLoading.value = true
             try {
+                ensureDefaultRepo()
                 val repos = repoDao.getAll()
-                // Default repo logic: if the user's configured repository list is empty
                 val repoUrls = if (repos.isEmpty()) {
-                    listOf("https://cdn.jsdelivr.net/gh/keiyoushi/extensions@repo/index.min.json")
+                    listOf(DEFAULT_REPO_URL)
                 } else {
                     repos.map { it.baseUrl }
                 }
@@ -157,7 +201,6 @@ class ExtensionManager(
                 for (url in repoUrls) {
                     try {
                         val index = extensionLoader.fetchRepoIndex(url)
-                        val repoBaseUrl = url.substringBeforeLast("/")
                         val processedExtensions = index.extensions.map { entry ->
                             val iconUrl = "https://cdn.jsdelivr.net/gh/keiyoushi/extensions@repo/icon/${entry.id}.png"
                             entry.copy(icon = iconUrl, repoUrl = url)
@@ -169,13 +212,15 @@ class ExtensionManager(
                 }
 
                 if (allEntries.isNotEmpty()) {
-                    _availableExtensions.value = allEntries
+                    // Same extension can appear in multiple repos — keep first, unique by id
+                    _availableExtensions.value = allEntries.distinctBy { it.id }
                     try {
-                        val newJson = gson.toJson(allEntries)
+                        val newJson = gson.toJson(_availableExtensions.value)
                         prefs.edit().putString("cached_extensions", newJson).apply()
                     } catch (e: Exception) {
                         Log.e(tag, "Failed to cache extensions", e)
                     }
+                    installDefaultExtensionsIfFirstLaunch(allEntries)
                 } else if (repoUrls.isNotEmpty() && cachedJson == null) {
                     _availableExtensions.value = emptyList()
                 }
@@ -183,20 +228,65 @@ class ExtensionManager(
                 // Refresh both local and system extensions
                 val systemInfos = extensionLoader.scanInstalledExtensions()
                 val localInfos = extensionLoader.scanLocalExtensions()
-                
+
                 // Merge: Local extensions take precedence if package names overlap
                 val localPkgs = localInfos.map { it.packageName }.toSet()
                 val installedInfos = localInfos + systemInfos.filter { !localPkgs.contains(it.packageName) }
-                
+
                 _installedExtensionInfos.value = installedInfos
 
-                // CRITICAL: Reload the actual Source classes into memory so they can be searched
-                loadInstalledExtensions()
+                // Reload sources only when fingerprint changed (avoid DEX reload on every UI refresh)
+                loadInstalledExtensions(force = false)
             } catch (e: Exception) {
                 Log.e(tag, "Error refreshing available extensions", e)
             } finally {
+                _isRepoRefreshing.value = false
                 _isLoading.value = false
+                isRefreshingRepos.set(false)
             }
+        }
+    }
+
+    private suspend fun installDefaultExtensionsIfFirstLaunch(entries: List<RepoExtensionEntry>) {
+        val prefs = context.getSharedPreferences("extension_cache", Context.MODE_PRIVATE)
+        if (prefs.getBoolean("first_launch_defaults_installed", false)) return
+
+        val curated = entries.filter { ExtensionAllowlist.isAllowed(it.id) }
+        val bySlug = curated.associateBy { ExtensionAllowlist.slugOf(it.id) }
+        val defaultEntries = ExtensionAllowlist.DEFAULT_INSTALL_SLUGS.mapNotNull { bySlug[it] }
+            .ifEmpty { curated.take(6) }
+
+        Log.i(tag, "First launch: Auto-installing ${defaultEntries.size} curated extensions...")
+        var installedAny = false
+
+        for (entry in defaultEntries) {
+            val id = entry.id
+            if (entry.repoUrl == null) continue
+            try {
+                val downloadedFile = extensionLoader.downloadExtensionApk(entry.repoUrl!!, entry)
+                val destFile = java.io.File(extensionLoader.extensionsDir, "${entry.id}.apk")
+                if (destFile.exists()) destFile.setWritable(true)
+                downloadedFile.copyTo(destFile, overwrite = true)
+                downloadedFile.delete()
+                extensionLoader.invalidateLoadedExtension(entry.id)
+
+                val existing = installedDao.getById(id)
+                if (existing != null) {
+                    installedDao.setTrusted(id, true)
+                } else {
+                    installedDao.insert(InstalledExtensionEntity(id = id, name = entry.name, isTrusted = true))
+                }
+
+                installedAny = true
+                Log.i(tag, "Successfully auto-installed curated extension: $id")
+            } catch (e: Exception) {
+                Log.e(tag, "Failed to auto-install curated extension $id", e)
+            }
+        }
+
+        if (installedAny) {
+            prefs.edit().putBoolean("first_launch_defaults_installed", true).apply()
+            refreshTrustCache()
         }
     }
 
@@ -213,24 +303,79 @@ class ExtensionManager(
 
     /**
      * Install an extension by ID.
-     * Downloads the APK and moves it to the internal extensions directory.
+     * Downloads the APK into the internal extensions directory and trusts it for loading.
      */
     suspend fun installExtension(extensionId: String) = withContext(Dispatchers.IO) {
-        val repos = repoDao.getAll()
-        for (repo in repos) {
-            try {
-                val index = extensionLoader.fetchRepoIndex(repo.baseUrl)
-                val entry = index.extensions.find { it.id == extensionId }
-                if (entry != null) {
-                    // Start download via Manager for system installation
-                    extensionLoader.downloadExtensionViaManager(repo.baseUrl, entry)
-                    return@withContext
-                }
-            } catch (e: Exception) {
-                Log.e(tag, "Failed to enqueue download for $extensionId", e)
+        val available = _availableExtensions.value.find { it.id == extensionId }
+        val entry = available ?: run {
+            val repos = repoDao.getAll()
+            val repoUrls = if (repos.isEmpty()) {
+                listOf(DEFAULT_REPO_URL)
+            } else {
+                repos.map { it.baseUrl }
             }
+            var found: RepoExtensionEntry? = null
+            for (url in repoUrls) {
+                try {
+                    val index = extensionLoader.fetchRepoIndex(url)
+                    found = index.extensions.find { it.id == extensionId }?.copy(repoUrl = url)
+                    if (found != null) break
+                } catch (e: Exception) {
+                    Log.e(tag, "Failed to look up $extensionId in $url", e)
+                }
+            }
+            found
+        } ?: throw Exception("Extension '$extensionId' not found")
+
+        if (!ExtensionAllowlist.isAllowed(extensionId)) {
+            throw Exception("This extension is not in Radiant's curated source list")
         }
-        throw Exception("Extension '$extensionId' not found or failed to enqueue")
+
+        if (!isExtensionLanguageEnabled(entry.lang)) {
+            throw Exception("Only English extensions can be installed")
+        }
+
+        val repoUrl = entry.repoUrl
+            ?: throw Exception("Extension '$extensionId' has no repository URL")
+
+        Log.i(tag, "Installing extension locally: $extensionId")
+        val downloadedFile = extensionLoader.downloadExtensionApk(repoUrl, entry)
+        val destFile = java.io.File(extensionLoader.extensionsDir, "${entry.id}.apk")
+        if (destFile.exists()) destFile.setWritable(true)
+        downloadedFile.copyTo(destFile, overwrite = true)
+        downloadedFile.delete()
+        extensionLoader.invalidateLoadedExtension(entry.id)
+
+        val existing = installedDao.getById(extensionId)
+        if (existing != null) {
+            installedDao.setTrusted(extensionId, true)
+        } else {
+            installedDao.insert(
+                InstalledExtensionEntity(id = extensionId, name = entry.name, isTrusted = true)
+            )
+        }
+
+        refreshTrustCache()
+        loadInstalledExtensions(force = true)
+        Log.i(tag, "Successfully installed and trusted extension: $extensionId")
+    }
+
+    /**
+     * Uninstall without refreshing the catalog (safe during loadInstalledExtensions).
+     */
+    private suspend fun removeExtensionLocally(packageName: String) {
+        extensionLoader.deleteLocalExtension(packageName)
+        installedDao.delete(packageName)
+        extensionLoader.invalidateLoadedExtension(packageName)
+
+        val registryEntriesToRemove = sourceRegistry.filter { (key, source) ->
+            key == packageName || (source is TachiyomiSourceAdapter && source.icon.contains(packageName))
+        }.keys
+        registryEntriesToRemove.forEach { sourceRegistry.remove(it) }
+
+        _installedExtensions.update { current ->
+            current.filterNot { it is TachiyomiSourceAdapter && it.icon.contains(packageName) }
+        }
     }
 
     /**
@@ -239,37 +384,13 @@ class ExtensionManager(
      */
     suspend fun uninstallExtension(packageName: String) = withContext(Dispatchers.IO) {
         Log.i(tag, "Uninstalling extension: $packageName")
-        
-        // a) Delete the .apk file from storage
-        val deletedFile = extensionLoader.deleteLocalExtension(packageName)
-        if (deletedFile) {
-            Log.d(tag, "Deleted APK for $packageName")
-        }
-        
-        // b) Delete the extension's record from the local Room Database
-        installedDao.delete(packageName)
-        
-        // c) Unload the class from the memory registry and update flows
-        
-        // Remove from unified source registry (both numeric ID and package name entries)
-        val registryEntriesToRemove = sourceRegistry.filter { (key, source) -> 
-            key == packageName || (source is TachiyomiSourceAdapter && source.icon.contains(packageName))
-        }.keys
-        registryEntriesToRemove.forEach { sourceRegistry.remove(it) }
+        removeExtensionLocally(packageName)
 
-        // Update active extensions list
-        _installedExtensions.update { current ->
-            current.filterNot { it is TachiyomiSourceAdapter && it.icon.contains(packageName) }
-        }
-        
-        // Update installed infos list so UI removes it instantly
         val currentInstalled = _installedExtensionInfos.value.toMutableList()
         currentInstalled.removeAll { it.packageName == packageName }
         _installedExtensionInfos.value = currentInstalled
-        
-        Log.i(tag, "Extension $packageName fully uninstalled and unloaded.")
 
-        // d) Final refresh to ensure 'Available' list recognizes it's no longer installed
+        Log.i(tag, "Extension $packageName fully uninstalled and unloaded.")
         refreshAvailable()
     }
 
@@ -309,101 +430,135 @@ class ExtensionManager(
         _trustedPackages.value = installedDao.getAll().filter { it.isTrusted }.map { it.id }.toSet()
     }
 
-    private suspend fun setupDefaultRepo() {
+    /**
+     * Ensures a default repo row exists. Must NOT call [refreshAvailable] —
+     * that used to recurse via loadInstalledExtensions → setupDefaultRepo → refreshAvailable
+     * and caused an infinite loading/scroll loop on the Extensions tab.
+     */
+    private suspend fun ensureDefaultRepo() {
         try {
             if (repoDao.getAll().isEmpty()) {
-                addRepo("https://cdn.jsdelivr.net/gh/keiyoushi/extensions@repo/index.min.json")
+                repoDao.insert(
+                    ExtensionRepoEntity(
+                        baseUrl = DEFAULT_REPO_URL,
+                        name = "Keiyoushi",
+                        shortName = "Official"
+                    )
+                )
+                Log.d(tag, "Inserted default extension repo")
             }
         } catch (e: Exception) {
-            Log.e(tag, "Failed to setup default repo", e)
+            Log.e(tag, "Failed to ensure default repo", e)
         }
     }
 
     // ─── Load installed extensions (called on app startup) ───
 
     suspend fun loadInstalledExtensions(force: Boolean = false) = withContext(Dispatchers.IO) {
-        if (_isLoading.value && !force) return@withContext
-        _isLoading.value = true
-        try {
-            setupDefaultRepo()
-            refreshTrustCache()
-            
-            Log.d(tag, "Scanning for extensions (system + local)...")
-            val systemInfos = extensionLoader.scanInstalledExtensions()
-            val localInfos = extensionLoader.scanLocalExtensions()
-            
-            // Merge: Local extensions take precedence
-            val localPkgs = localInfos.map { it.packageName }.toSet()
-            val installedInfos = localInfos + systemInfos.filter { !localPkgs.contains(it.packageName) }
-            
-            _installedExtensionInfos.value = installedInfos
+        // Avoid clobbering an in-flight repo refresh unless explicitly forced
+        if (_isLoading.value && !force && !_isRepoRefreshing.value) return@withContext
 
-            val trusted = _trustedPackages.value
-            
-            // Optimization: Generate a fingerprint of current state to avoid redundant class loading
-            val currentFingerprint = installedInfos
-                .filter { trusted.contains(it.packageName) }
-                .joinToString("|") { "${it.packageName}:${it.versionCode}" }
-            
-            if (!force && currentFingerprint == lastLoadedFingerprint && _installedExtensions.value.isNotEmpty()) {
-                Log.d(tag, "No changes in trusted extensions. Skipping source reload.")
-                return@withContext
-            }
+        loadMutex.withLock {
+            val ownsLoadingFlag = !_isRepoRefreshing.value
+            if (ownsLoadingFlag) _isLoading.value = true
+            try {
+                ensureDefaultRepo()
+                refreshTrustCache()
 
-            val loadedSources = mutableListOf<Source>()
-            sourceRegistry.clear() // Clear registry before repopulating
+                Log.d(tag, "Scanning for extensions (system + local)...")
+                val systemInfos = extensionLoader.scanInstalledExtensions()
+                val localInfos = extensionLoader.scanLocalExtensions()
 
-            Log.d(tag, "Installed extensions found: ${installedInfos.size}. Trusted packages: ${trusted.size}")
+                // Merge: Local extensions take precedence
+                val localPkgs = localInfos.map { it.packageName }.toSet()
+                val installedInfos = localInfos + systemInfos.filter { !localPkgs.contains(it.packageName) }
 
-            // Load all trusted extensions concurrently to avoid sequential ClassLoader bottleneck
-            val perExtensionResults = installedInfos
-                .filter { extInfo ->
-                    val isTrusted = trusted.contains(extInfo.packageName)
-                    if (!isTrusted) {
-                        Log.w(tag, "Extension NOT trusted: ${extInfo.packageName}. Skipping source load.")
-                    }
-                    isTrusted
+                val trusted = _trustedPackages.value
+
+                // Drop non-curated local APKs so DexClassLoaders / memory stay small
+                val disallowed = installedInfos.filter { !ExtensionAllowlist.isAllowed(it.packageName) }
+                for (info in disallowed) {
+                    Log.i(tag, "Removing non-curated extension: ${info.packageName}")
+                    removeExtensionLocally(info.packageName)
                 }
-                .map { extInfo ->
-                    async(Dispatchers.IO) {
-                        try {
-                            Log.d(tag, "Loading sources for extension: ${extInfo.packageName}")
-                            val tachiyomiSources = extensionLoader.loadExtensionSources(extInfo)
-                            val iconUri = "pkg:${extInfo.packageName}"
-                            tachiyomiSources.map { tSource ->
-                                TachiyomiSourceAdapter(tSource, iconUri) to extInfo.packageName
+                val curatedInfos = installedInfos.filter { ExtensionAllowlist.isAllowed(it.packageName) }
+                _installedExtensionInfos.value = curatedInfos
+
+                // Optimization: Generate a fingerprint of current state to avoid redundant class loading
+                val currentFingerprint = curatedInfos
+                    .filter { trusted.contains(it.packageName) }
+                    .joinToString("|") { "${it.packageName}:${it.versionCode}" } + "|allowlist|lang=en"
+
+                // Skip even when the previous load produced 0 sources (e.g. all failed).
+                // Requiring isNotEmpty() caused a tight retry loop on Android 14+ writable-dex failures.
+                if (!force && currentFingerprint == lastLoadedFingerprint) {
+                    Log.d(tag, "No changes in trusted extensions. Skipping source reload.")
+                    return@withLock
+                }
+
+                val loadedSources = mutableListOf<Source>()
+                sourceRegistry.clear() // Clear registry before repopulating
+
+                Log.d(tag, "Installed curated extensions: ${curatedInfos.size}. Trusted packages: ${trusted.size}")
+
+                // Load trusted allowlisted extensions with bounded concurrency (max 2)
+                val perExtensionResults = curatedInfos
+                    .filter { extInfo ->
+                        val isTrusted = trusted.contains(extInfo.packageName)
+                        if (!isTrusted) {
+                            Log.w(tag, "Extension NOT trusted: ${extInfo.packageName}. Skipping source load.")
+                        }
+                        isTrusted
+                    }
+                    .map { extInfo ->
+                        async(Dispatchers.IO) {
+                            com.radiant.webtoon.core.concurrent.AppWorkQueues.withExtensionLoad {
+                                try {
+                                    Log.d(tag, "Loading sources for extension: ${extInfo.packageName}")
+                                    val tachiyomiSources = extensionLoader.loadExtensionSources(extInfo)
+                                    val iconUri = if (extInfo.apkPath.startsWith(context.filesDir.absolutePath)) {
+                                        "apk:${extInfo.apkPath}"
+                                    } else {
+                                        "pkg:${extInfo.packageName}"
+                                    }
+                                    tachiyomiSources.map { tSource ->
+                                        TachiyomiSourceAdapter(tSource, iconUri) to extInfo.packageName
+                                    }
+                                } catch (e: Exception) {
+                                    Log.e(tag, "Failed to load extension: ${extInfo.name} (${extInfo.packageName})", e)
+                                    emptyList()
+                                }
                             }
-                        } catch (e: Exception) {
-                            Log.e(tag, "Failed to load extension: ${extInfo.name} (${extInfo.packageName})", e)
-                            emptyList()
                         }
                     }
+                    .awaitAll()
+                    .flatten()
+
+                // Register English sources only — other languages stay loaded in the APK but disabled
+                for ((adapter, pkgName) in perExtensionResults) {
+                    if (!isSourceLanguageEnabled(adapter.lang)) continue
+                    loadedSources.add(adapter)
+                    sourceRegistry[adapter.id] = adapter
+                    sourceRegistry.putIfAbsent(pkgName, adapter)
                 }
-                .awaitAll() // Wait for all extensions to finish loading simultaneously
-                .flatten()  // Flatten List<List<Pair>> -> List<Pair>
 
-            // Register results and populate loadedSources
-            for ((adapter, pkgName) in perExtensionResults) {
-                loadedSources.add(adapter)
-                sourceRegistry[adapter.id] = adapter
-                sourceRegistry[pkgName] = adapter
+                Log.i(
+                    tag,
+                    "Finished loading extensions. Instantiated ${loadedSources.size} English sources " +
+                        "(from ${perExtensionResults.size} total)."
+                )
+
+                _installedExtensions.value = loadedSources
+                lastLoadedFingerprint = currentFingerprint
+                Log.i(tag, "Total sources active: ${loadedSources.size} (Registry size: ${sourceRegistry.size})")
+            } catch (e: Exception) {
+                Log.e(tag, "Error loading installed extensions", e)
+                if (_installedExtensions.value.isEmpty()) {
+                    _installedExtensions.value = emptyList()
+                }
+            } finally {
+                if (ownsLoadingFlag) _isLoading.value = false
             }
-
-            Log.i(tag, "Finished loading extensions. Instantiated ${loadedSources.size} sources.")
-
-            // No language or NSFW filter — show all installed sources
-            Log.i(tag, "All installed sources loaded: ${loadedSources.size}")
-
-            _installedExtensions.value = loadedSources
-            lastLoadedFingerprint = currentFingerprint
-            Log.i(tag, "Total sources active: ${loadedSources.size} (Registry size: ${sourceRegistry.size})")
-        } catch (e: Exception) {
-            Log.e(tag, "Error loading installed extensions", e)
-            if (_installedExtensions.value.isEmpty()) {
-                _installedExtensions.value = emptyList()
-            }
-        } finally {
-            _isLoading.value = false
         }
     }
 
@@ -440,7 +595,9 @@ class ExtensionManager(
         val trusted = _trustedPackages.value
         val availableMap = _availableExtensions.value.associateBy { it.id }
 
-        return _installedExtensionInfos.value.map { info ->
+        return _installedExtensionInfos.value
+            .filter { ExtensionAllowlist.isAllowed(it.packageName) }
+            .map { info ->
             val iconUri = if (info.apkPath.startsWith(context.filesDir.absolutePath)) {
                 "apk:${info.apkPath}"
             } else {
@@ -476,13 +633,17 @@ class ExtensionManager(
 
     /**
      * Convert available repo entries to Extension model for UI display.
-     * Marks entries as installed if their package name matches a scanned extension.
+     * Only curated English sources are listed.
      */
     fun getAvailableAsExtensions(): List<Extension> {
         val installedPkgs = _installedExtensionInfos.value.map { it.packageName }.toSet()
         val trusted = _trustedPackages.value
         return _availableExtensions.value
+            .distinctBy { it.id }
+            .filter { entry -> ExtensionAllowlist.isAllowed(entry.id) }
             .filter { entry -> !installedPkgs.contains(entry.id) }
+            // NSFW filter does not hide allowlisted packs (Toonily, Manga18fx, etc.)
+            .sortedBy { it.name.lowercase() }
             .map { entry ->
             val effectiveBaseUrl = entry.baseUrl ?: entry.sources?.firstOrNull()?.baseUrl ?: ""
             val downloadUrl = if (entry.repoUrl != null) {
@@ -501,7 +662,8 @@ class ExtensionManager(
                 description = entry.description,
                 baseUrl = effectiveBaseUrl,
                 downloadUrl = downloadUrl,
-                isInstalled = installedPkgs.contains(entry.id)
+                isInstalled = installedPkgs.contains(entry.id),
+                isLanguageEnabled = true
             )
         }
     }

@@ -6,9 +6,7 @@ import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
-import androidx.compose.runtime.Composable
-import androidx.compose.runtime.collectAsState
-import androidx.compose.runtime.getValue
+import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
@@ -18,6 +16,9 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.radiant.webtoon.WebtoonApplication
 import com.radiant.webtoon.core.database.DownloadStatus
 import com.radiant.webtoon.core.database.DownloadTask
+import com.radiant.webtoon.ui.components.AnimatedListRow
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -27,9 +28,28 @@ fun DownloadQueueScreen(
     val context = LocalContext.current
     val app = context.applicationContext as WebtoonApplication
     val queueManager = app.downloadQueueManager
+    val scope = rememberCoroutineScope()
 
     val activeDownloads by queueManager.activeDownloads.collectAsStateWithLifecycle()
     val downloadSpeed by queueManager.downloadSpeed.collectAsStateWithLifecycle()
+    var exitingKeys by remember { mutableStateOf(setOf<String>()) }
+
+    fun taskKey(task: DownloadTask) = "${task.sourceId}_${task.chapterId}"
+
+    fun cancelWithAnimation(task: DownloadTask) {
+        val key = taskKey(task)
+        if (key in exitingKeys) return
+        exitingKeys = exitingKeys + key
+        scope.launch {
+            delay(280)
+            queueManager.cancel(task.chapterId, task.sourceId)
+            exitingKeys = exitingKeys - key
+        }
+    }
+
+    fun cancelAllWithAnimation() {
+        activeDownloads.forEach { cancelWithAnimation(it) }
+    }
 
     Scaffold(
         topBar = {
@@ -74,11 +94,7 @@ fun DownloadQueueScreen(
                         }
                     }
                     if (activeDownloads.isNotEmpty()) {
-                        IconButton(onClick = {
-                            activeDownloads.forEach { task ->
-                                queueManager.cancel(task.chapterId, task.sourceId)
-                            }
-                        }) {
+                        IconButton(onClick = { cancelAllWithAnimation() }) {
                             Icon(Icons.Default.ClearAll, contentDescription = "Cancel All")
                         }
                     }
@@ -100,18 +116,25 @@ fun DownloadQueueScreen(
             LazyColumn(
                 modifier = Modifier.fillMaxSize().padding(paddingValues)
             ) {
-                itemsIndexed(activeDownloads, key = { _, item -> "${item.sourceId}_${item.chapterId}" }) { index, task ->
-                    DownloadItemRow(
-                        task = task,
-                        isFirst = index == 0,
-                        isLast = index == activeDownloads.lastIndex,
-                        onPause = { queueManager.pause(task.chapterId, task.sourceId) },
-                        onResume = { queueManager.resume(task.chapterId, task.sourceId) },
-                        onCancel = { queueManager.cancel(task.chapterId, task.sourceId) },
-                        onMoveUp = { queueManager.reorder(index, index - 1) },
-                        onMoveDown = { queueManager.reorder(index, index + 1) }
-                    )
-                    HorizontalDivider()
+                itemsIndexed(activeDownloads, key = { _, item -> taskKey(item) }) { index, task ->
+                    val key = taskKey(task)
+                    AnimatedListRow(visible = key !in exitingKeys) {
+                        Column {
+                            DownloadItemRow(
+                                task = task,
+                                isFirst = index == 0,
+                                isLast = index == activeDownloads.lastIndex,
+                                onPause = { queueManager.pause(task.chapterId, task.sourceId) },
+                                onResume = { queueManager.resume(task.chapterId, task.sourceId) },
+                                onCancel = { cancelWithAnimation(task) },
+                                onMoveUp = { queueManager.reorder(index, index - 1) },
+                                onMoveDown = { queueManager.reorder(index, index + 1) },
+                            )
+                            HorizontalDivider(
+                                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.45f),
+                            )
+                        }
+                    }
                 }
             }
         }

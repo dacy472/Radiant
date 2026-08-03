@@ -6,6 +6,7 @@ import com.radiant.webtoon.core.database.Manga
 import com.radiant.webtoon.core.model.Webtoon
 import com.radiant.webtoon.core.repository.WebtoonRepository
 import com.radiant.webtoon.core.source.Source
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -19,8 +20,11 @@ class MigrationViewModel(private val repository: WebtoonRepository) : ViewModel(
     private val _isMigrating = MutableStateFlow(false)
     val isMigrating: StateFlow<Boolean> = _isMigrating.asStateFlow()
 
+    private var loadJob: Job? = null
+
     fun loadMangasBySource(sourceId: String) {
-        viewModelScope.launch {
+        loadJob?.cancel()
+        loadJob = viewModelScope.launch {
             repository.mangaDao.getMangaBySource(sourceId).collect {
                 _mangasToMigrate.value = it
             }

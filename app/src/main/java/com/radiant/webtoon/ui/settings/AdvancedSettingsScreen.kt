@@ -90,8 +90,8 @@ fun AdvancedSettingsScreen(onBackClick: () -> Unit) {
             var cacheCleared by remember { mutableStateOf(false) }
             Button(
                 onClick = {
-                    // Clear Coil image cache
-                    val imageLoader = coil.ImageLoader.Builder(context).build()
+                    // Clear the app-wide Coil ImageLoader cache
+                    val imageLoader = coil.Coil.imageLoader(context)
                     imageLoader.diskCache?.clear()
                     imageLoader.memoryCache?.clear()
                     cacheCleared = true

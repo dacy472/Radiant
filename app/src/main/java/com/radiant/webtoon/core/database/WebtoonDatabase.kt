@@ -12,9 +12,10 @@ import androidx.room.*
         ExtensionRepoEntity::class,
         InstalledExtensionEntity::class,
         Category::class,
-        LibraryCategoryCrossRef::class
+        LibraryCategoryCrossRef::class,
+        Track::class
     ],
-    version = 9
+    version = 10
 )
 abstract class WebtoonDatabase : RoomDatabase() {
     abstract fun mangaDao(): MangaDao
@@ -24,6 +25,7 @@ abstract class WebtoonDatabase : RoomDatabase() {
     abstract fun extensionRepoDao(): ExtensionRepoDao
     abstract fun installedExtensionDao(): InstalledExtensionDao
     abstract fun categoryDao(): CategoryDao
+    abstract fun trackDao(): TrackDao
 
     companion object {
         @Volatile

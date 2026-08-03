@@ -22,7 +22,11 @@ interface Source {
     val icon: String
 
     suspend fun fetchPopularManga(page: Int): PagedWebtoonResponse
+    suspend fun fetchLatestManga(page: Int): PagedWebtoonResponse = PagedWebtoonResponse(emptyList(), false)
     suspend fun fetchSearchManga(page: Int, query: String, filters: FilterList): MangasPage
+
+    /** Tachiyomi-compatible filter list for search/browse. */
+    fun getFilterList(): FilterList = FilterList()
     
     /**
      * Legacy method that fetches both details and chapters sequentially.
@@ -40,6 +44,20 @@ interface Source {
     suspend fun getChapterList(webtoonId: String): List<Chapter>
 
     suspend fun getChapterPages(chapterId: String): List<String>
+
+    /**
+     * Absolute URL for the manga/webtoon page on the source site (for WebView / open in browser).
+     * Default joins [baseUrl] and [webtoonId] with a single slash.
+     */
+    fun getMangaPageUrl(webtoonId: String): String {
+        if (webtoonId.startsWith("http://") || webtoonId.startsWith("https://")) return webtoonId
+        val base = baseUrl.trimEnd('/')
+        val path = webtoonId.trimStart('/')
+        return if (base.isEmpty()) path else "$base/$path"
+    }
+
+    /** Optional HTTP headers for WebView loads (e.g. User-Agent from HttpSource). */
+    fun getWebViewHeaders(): Map<String, String> = emptyMap()
     
     val capabilities: SourceCapabilities
 }

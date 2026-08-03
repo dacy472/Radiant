@@ -14,6 +14,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.unit.dp
+import com.radiant.webtoon.ui.components.DownloadManagerIconButton
 import com.radiant.webtoon.ui.components.bounceClick
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -24,12 +25,23 @@ fun SettingsScreen(
     onReaderClick: () -> Unit,
     onDownloadsClick: () -> Unit,
     onDownloadQueueClick: () -> Unit,
+    onBackupClick: () -> Unit,
+    onStorageClick: () -> Unit,
+    onTrackingClick: () -> Unit,
     onSecurityClick: () -> Unit,
     onAboutClick: () -> Unit,
-    onAdvancedClick: () -> Unit
+    onAdvancedClick: () -> Unit,
+    onStatsClick: () -> Unit = {}
 ) {
     Scaffold(
-        topBar = { TopAppBar(title = { Text("Settings") }) }
+        topBar = {
+            TopAppBar(
+                title = { Text("Settings") },
+                actions = {
+                    DownloadManagerIconButton(onClick = onDownloadQueueClick)
+                },
+            )
+        }
     ) { paddingValues ->
         LazyColumn(
             modifier = Modifier.padding(paddingValues).fillMaxSize(),
@@ -42,7 +54,18 @@ fun SettingsScreen(
                     icon = Icons.Default.Settings,
                     items = listOf(
                         SettingsSubItem("Appearance", "Theme, date and time format", Icons.Default.Palette, onAppearanceClick),
-                        SettingsSubItem("Library", "Categories, update frequency", Icons.Default.LibraryBooks, onLibraryClick)
+                        SettingsSubItem("Library", "Categories", Icons.Default.LibraryBooks, onLibraryClick)
+                    )
+                )
+            }
+            item {
+                CollapsibleSettingsCard(
+                    title = "Data & Storage",
+                    icon = Icons.Default.Storage,
+                    items = listOf(
+                        SettingsSubItem("Backup & Restore", "Export or import library data", Icons.Default.Backup, onBackupClick),
+                        SettingsSubItem("Storage", "Completed downloads by title", Icons.Default.Folder, onStorageClick),
+                        SettingsSubItem("Download Queue", "View and manage active downloads", Icons.Default.Download, onDownloadQueueClick)
                     )
                 )
             }
@@ -52,29 +75,11 @@ fun SettingsScreen(
                     icon = Icons.Default.ChromeReaderMode,
                     items = listOf(
                         SettingsSubItem("Reader", "Reading mode, display, navigation", Icons.Default.MenuBook, onReaderClick),
-                        SettingsSubItem("Downloads", "Download location", Icons.Default.FileDownload, onDownloadsClick)
+                        SettingsSubItem("Downloads", "Download location", Icons.Default.FileDownload, onDownloadsClick),
+                        SettingsSubItem("Tracking", "AniList and progress sync", Icons.Default.Bookmark, onTrackingClick),
+                        SettingsSubItem("Reading stats", "Weekly chapters and library totals", Icons.Default.BarChart, onStatsClick)
                     )
                 )
-            }
-            item {
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .bounceClick { onDownloadQueueClick() }
-                        .clip(RoundedCornerShape(24.dp)),
-                    colors = CardDefaults.cardColors(
-                        containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.3f)
-                    )
-                ) {
-                    ListItem(
-                        modifier = Modifier.fillMaxWidth(),
-                        headlineContent = { Text("Download Queue", fontWeight = androidx.compose.ui.text.font.FontWeight.Bold) },
-                        supportingContent = { Text("View and manage active downloads") },
-                        leadingContent = { Icon(Icons.Default.Download, contentDescription = null, tint = MaterialTheme.colorScheme.primary) },
-                        trailingContent = { Icon(Icons.Default.ChevronRight, contentDescription = null) },
-                        colors = ListItemDefaults.colors(containerColor = androidx.compose.ui.graphics.Color.Transparent)
-                    )
-                }
             }
             item {
                 CollapsibleSettingsCard(

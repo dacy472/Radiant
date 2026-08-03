@@ -7,9 +7,7 @@ class MockSource : Source {
     override val name = "Mock Source"
     override val baseUrl = "https://example.com"
     override val lang = "en"
-    override var isPinned: Boolean
-        get() = TODO("Not yet implemented")
-        set(value) {}
+    override var isPinned: Boolean = false
     override val icon = "🎨"
     override val capabilities: SourceCapabilities = SourceCapabilities(
         supportsSearch = true,
@@ -30,6 +28,21 @@ class MockSource : Source {
                 )
             },
             hasNextPage = true
+        )
+    }
+
+    override suspend fun fetchLatestManga(page: Int): PagedWebtoonResponse {
+        return PagedWebtoonResponse(
+            webtoons = List(10) { i ->
+                Webtoon(
+                    id = "latest-$i",
+                    title = "Latest Mock $i",
+                    thumbnail = "https://picsum.photos/seed/latest$i/200/300",
+                    status = "Ongoing",
+                    author = "Mock Author"
+                )
+            },
+            hasNextPage = page < 3
         )
     }
 

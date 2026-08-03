@@ -47,4 +47,7 @@ interface DownloadDao {
 
     @Query("DELETE FROM downloads WHERE chapterId = :chapterId AND sourceId = :sourceId")
     suspend fun delete(chapterId: String, sourceId: String)
+
+    @Query("SELECT * FROM downloads WHERE status = 'COMPLETED' ORDER BY webtoonTitle ASC, dateAdded DESC")
+    suspend fun getCompleted(): List<DownloadTask>
 }

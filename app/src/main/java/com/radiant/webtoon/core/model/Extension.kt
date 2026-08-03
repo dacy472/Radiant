@@ -49,6 +49,8 @@ sealed class Extension {
         val description: String? = null,
         val baseUrl: String? = "",
         val downloadUrl: String? = null,
-        override val isInstalled: Boolean = false
+        override val isInstalled: Boolean = false,
+        /** False for non-English catalog entries — shown but not installable. */
+        val isLanguageEnabled: Boolean = true
     ) : Extension()
 }

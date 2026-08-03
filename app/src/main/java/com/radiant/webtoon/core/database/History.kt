@@ -22,6 +22,9 @@ interface HistoryDao {
     @Query("SELECT * FROM history ORDER BY read_at DESC")
     fun getAllFlow(): Flow<List<History>>
 
+    @Query("SELECT * FROM history ORDER BY read_at DESC")
+    suspend fun getAll(): List<History>
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(history: History)
 

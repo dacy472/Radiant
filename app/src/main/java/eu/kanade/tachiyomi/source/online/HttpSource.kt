@@ -57,7 +57,7 @@ abstract class HttpSource : CatalogueSource {
      * Headers builder for requests.
      */
     protected open fun headersBuilder(): Headers.Builder = Headers.Builder().apply {
-        add("User-Agent", DEFAULT_USER_AGENT)
+        add("User-Agent", network.defaultUserAgentProvider())
     }
 
     override fun toString(): String = "$name (${lang.uppercase()})"
@@ -72,8 +72,13 @@ abstract class HttpSource : CatalogueSource {
         }
     }
 
-    protected abstract fun popularMangaRequest(page: Int): Request
-    protected abstract fun popularMangaParse(response: Response): MangasPage
+    // NOTE: These are `open` (not `abstract`) to match modern Mihon/Keiyoushi's extensions-lib.
+    // Newer extensions often skip this Request/Parse pattern entirely and instead override the
+    // suspend getPopularManga/getSearchManga/getLatestUpdates contract directly. Declaring these
+    // as abstract here would force the JVM to require an override that a modern extension never
+    // provides, causing AbstractMethodError at runtime when this fallback path is invoked.
+    protected open fun popularMangaRequest(page: Int): Request = throw UnsupportedOperationException()
+    protected open fun popularMangaParse(response: Response): MangasPage = throw UnsupportedOperationException()
 
     // ─── Search Manga ───
 
@@ -85,8 +90,8 @@ abstract class HttpSource : CatalogueSource {
         }
     }
 
-    protected abstract fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request
-    protected abstract fun searchMangaParse(response: Response): MangasPage
+    protected open fun searchMangaRequest(page: Int, query: String, filters: FilterList): Request = throw UnsupportedOperationException()
+    protected open fun searchMangaParse(response: Response): MangasPage = throw UnsupportedOperationException()
 
     // ─── Latest Updates ───
 
@@ -98,8 +103,8 @@ abstract class HttpSource : CatalogueSource {
         }
     }
 
-    protected abstract fun latestUpdatesRequest(page: Int): Request
-    protected abstract fun latestUpdatesParse(response: Response): MangasPage
+    protected open fun latestUpdatesRequest(page: Int): Request = throw UnsupportedOperationException()
+    protected open fun latestUpdatesParse(response: Response): MangasPage = throw UnsupportedOperationException()
 
     // ─── Manga Details ───
 
@@ -119,7 +124,7 @@ abstract class HttpSource : CatalogueSource {
             .build()
     }
 
-    protected abstract fun mangaDetailsParse(response: Response): SManga
+    protected open fun mangaDetailsParse(response: Response): SManga = throw UnsupportedOperationException()
 
     // ─── Chapter List ───
 
@@ -139,7 +144,7 @@ abstract class HttpSource : CatalogueSource {
             .build()
     }
 
-    protected abstract fun chapterListParse(response: Response): List<SChapter>
+    protected open fun chapterListParse(response: Response): List<SChapter> = throw UnsupportedOperationException()
 
     // ─── Page List ───
 
@@ -159,10 +164,11 @@ abstract class HttpSource : CatalogueSource {
             .build()
     }
 
-    protected abstract fun pageListParse(response: Response): List<Page>
+    protected open fun pageListParse(response: Response): List<Page> = throw UnsupportedOperationException()
 
     // ─── Image URL ───
 
+    @Deprecated("Use the suspend API instead", ReplaceWith("getImageUrl"))
     open fun fetchImageUrl(page: Page): Observable<String> {
         return Observable.fromCallable {
             val request = imageUrlRequest(page)
@@ -170,6 +176,13 @@ abstract class HttpSource : CatalogueSource {
             imageUrlParse(response)
         }
     }
+
+    /**
+     * Suspend contract for resolving a page's image url. Extensions may override this directly
+     * instead of the deprecated Observable-based [fetchImageUrl]/[imageUrlRequest]/[imageUrlParse].
+     */
+    @Suppress("DEPRECATION")
+    open suspend fun getImageUrl(page: Page): String = fetchImageUrl(page).toBlocking().first()
 
     protected open fun imageUrlRequest(page: Page): Request {
         return Request.Builder()

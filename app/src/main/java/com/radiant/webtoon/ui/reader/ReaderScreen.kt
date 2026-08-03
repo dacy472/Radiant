@@ -1,5 +1,6 @@
 package com.radiant.webtoon.ui.reader
 
+import android.view.KeyEvent
 import android.view.WindowManager
 import android.widget.Toast
 import androidx.compose.animation.AnimatedVisibility
@@ -10,6 +11,7 @@ import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -33,6 +35,7 @@ import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Crop
 import androidx.compose.material.icons.filled.NavigateNext
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.foundation.layout.width
 import androidx.compose.material3.ButtonDefaults
@@ -53,6 +56,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -61,6 +65,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -72,10 +77,15 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import coil.compose.SubcomposeAsyncImage
+import coil.imageLoader
 import coil.request.CachePolicy
 import coil.request.ImageRequest
+import coil.size.Precision
 import kotlinx.coroutines.launch
 import com.radiant.webtoon.core.settings.SettingsManager
+import androidx.compose.ui.input.key.onKeyEvent
+import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
 @Composable
@@ -90,8 +100,20 @@ fun ReaderScreen(
     val context = LocalContext.current
     val view = LocalView.current
     val settingsManager = remember { SettingsManager(context) }
+    val density = LocalDensity.current
+    val screenWidthPx = with(density) {
+        LocalConfiguration.current.screenWidthDp.dp.roundToPx()
+    }
+
+    // Soft-evict decoded pages when leaving the reader to free heap
+    DisposableEffect(Unit) {
+        onDispose {
+            context.imageLoader.memoryCache?.clear()
+        }
+    }
 
     val keepScreenOn by settingsManager.keepScreenOn.collectAsStateWithLifecycle(initialValue = true)
+    val volumeKeysNav by settingsManager.volumeKeysNav.collectAsStateWithLifecycle(initialValue = false)
 
     val viewModel: ReaderViewModel = viewModel(
         factory = ReaderViewModelFactory(context.applicationContext as android.app.Application, repository)
@@ -106,8 +128,10 @@ fun ReaderScreen(
     val nextChapter by viewModel.nextChapter.collectAsStateWithLifecycle()
 
     val coroutineScope = rememberCoroutineScope()
+    var markedRead by remember(chapterId) { mutableStateOf(false) }
 
     LaunchedEffect(sourceId, webtoonId, chapterId) {
+        markedRead = false
         viewModel.loadChapter(sourceId, webtoonId, chapterId, chapterTitle)
     }
 
@@ -145,6 +169,17 @@ fun ReaderScreen(
         }
     }
 
+    // Mark chapter read near the end (last page or ~90%)
+    LaunchedEffect(currentPage, sortedPages.size, chapterId) {
+        if (!markedRead && sortedPages.isNotEmpty()) {
+            val threshold = (sortedPages.size * 0.9f).toInt().coerceAtLeast(1)
+            if (currentPage >= threshold || currentPage >= sortedPages.size) {
+                markedRead = true
+                viewModel.markChapterReadWhenComplete(chapterId, webtoonId)
+            }
+        }
+    }
+
     // Convert source headers to a Map for Coil's ImageRequest
     val headersMap = remember(sourceHeaders) {
         val map = mutableMapOf<String, String>()
@@ -174,7 +209,43 @@ fun ReaderScreen(
         }
     }
 
-    Box(modifier = Modifier.fillMaxSize().background(backgroundColor)) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(backgroundColor)
+            .onKeyEvent { event ->
+                if (!volumeKeysNav || event.nativeKeyEvent.action != KeyEvent.ACTION_DOWN) return@onKeyEvent false
+                when (event.nativeKeyEvent.keyCode) {
+                    KeyEvent.KEYCODE_VOLUME_DOWN -> {
+                        coroutineScope.launch {
+                            if (readingMode == 0) {
+                                val next = (listState.firstVisibleItemIndex + 1).coerceAtMost(sortedPages.lastIndex)
+                                listState.animateScrollToItem(next)
+                            } else {
+                                pagerState.animateScrollToPage(
+                                    (pagerState.currentPage + 1).coerceAtMost(pagerState.pageCount - 1)
+                                )
+                            }
+                        }
+                        true
+                    }
+                    KeyEvent.KEYCODE_VOLUME_UP -> {
+                        coroutineScope.launch {
+                            if (readingMode == 0) {
+                                val prev = (listState.firstVisibleItemIndex - 1).coerceAtLeast(0)
+                                listState.animateScrollToItem(prev)
+                            } else {
+                                pagerState.animateScrollToPage(
+                                    (pagerState.currentPage - 1).coerceAtLeast(0)
+                                )
+                            }
+                        }
+                        true
+                    }
+                    else -> false
+                }
+            }
+    ) {
         if (isLoading) {
             CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
         } else if (sortedPages.isEmpty()) {
@@ -202,6 +273,8 @@ fun ReaderScreen(
                                         addHeader(key, value)
                                     }
                                 }
+                                .size(coil.size.Size(screenWidthPx, coil.size.Dimension.Undefined))
+                                .precision(Precision.INEXACT)
                                 .crossfade(true)
                                 .diskCachePolicy(CachePolicy.ENABLED)
                                 .memoryCachePolicy(CachePolicy.ENABLED)
@@ -287,6 +360,9 @@ fun ReaderScreen(
                     key = { it }
                 ) { pageIndex ->
                     if (pageIndex < sortedPages.size) {
+                        var scale by remember { mutableFloatStateOf(1f) }
+                        var offsetX by remember { mutableFloatStateOf(0f) }
+                        var offsetY by remember { mutableFloatStateOf(0f) }
                         AsyncImage(
                             model = ImageRequest.Builder(context)
                                 .data(sortedPages[pageIndex])
@@ -295,13 +371,34 @@ fun ReaderScreen(
                                         addHeader(key, value)
                                     }
                                 }
+                                .size(coil.size.Size(screenWidthPx, coil.size.Dimension.Undefined))
+                                .precision(Precision.INEXACT)
                                 .crossfade(true)
                                 .allowHardware(false)
                                 .memoryCachePolicy(CachePolicy.ENABLED)
                                 .diskCachePolicy(CachePolicy.ENABLED)
                                 .build(),
                             contentDescription = "Page ${pageIndex + 1}",
-                            modifier = Modifier.fillMaxSize(),
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .pointerInput(Unit) {
+                                    detectTransformGestures { _, pan, zoom, _ ->
+                                        scale = (scale * zoom).coerceIn(1f, 4f)
+                                        if (scale > 1f) {
+                                            offsetX += pan.x
+                                            offsetY += pan.y
+                                        } else {
+                                            offsetX = 0f
+                                            offsetY = 0f
+                                        }
+                                    }
+                                }
+                                .graphicsLayer {
+                                    scaleX = scale
+                                    scaleY = scale
+                                    translationX = offsetX
+                                    translationY = offsetY
+                                },
                             contentScale = if (cropBorders) ContentScale.FillWidth else ContentScale.Fit
                         )
                     } else {
@@ -449,26 +546,28 @@ fun ReaderScreen(
                                 }
                             }
 
-                            // ── Controls row ──
+                            // ── Quick controls (settings live in the top bar) ──
                             Row(
                                 modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
                                 horizontalArrangement = Arrangement.SpaceEvenly
                             ) {
-                                IconButton(onClick = { showSettingsSheet = true }) {
-                                    Icon(Icons.Default.Settings, contentDescription = "Settings", tint = Color.White)
-                                }
                                 IconButton(onClick = { viewModel.setCropBorders(!cropBorders) }) {
                                     Icon(
-                                        Icons.Default.Crop, 
-                                        contentDescription = "Crop borders", 
+                                        Icons.Default.Crop,
+                                        contentDescription = if (cropBorders) "Crop borders on" else "Crop borders off",
                                         tint = if (cropBorders) MaterialTheme.colorScheme.primary else Color.White
                                     )
                                 }
-                                IconButton(onClick = { 
+                                IconButton(onClick = {
                                     val nextMode = (readingMode + 1) % 3
                                     viewModel.setReadingMode(nextMode)
                                 }) {
-                                    Icon(Icons.Default.SwapVert, contentDescription = "Toggle reading direction", tint = Color.White)
+                                    val (modeIcon, modeLabel) = when (readingMode) {
+                                        1 -> Icons.Default.SwapHoriz to "Left to right"
+                                        2 -> Icons.Default.SwapHoriz to "Right to left"
+                                        else -> Icons.Default.SwapVert to "Vertical scroll"
+                                    }
+                                    Icon(modeIcon, contentDescription = "Reading mode: $modeLabel", tint = Color.White)
                                 }
                             }
                         }

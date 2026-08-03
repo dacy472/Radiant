@@ -4,11 +4,11 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import com.radiant.webtoon.core.model.SourceSearchResult
 import com.radiant.webtoon.core.repository.WebtoonRepository
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import android.util.Log
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import uy.kohesive.injekt.injectLazy
@@ -50,6 +50,7 @@ class GlobalSearchViewModel(private val repository: WebtoonRepository) : ViewMod
     val error: StateFlow<String?> = _error
 
     private val networkHelper: NetworkHelper by injectLazy()
+    private var pinDefaultApplied = false
 
     init {
         viewModelScope.launch {
@@ -59,10 +60,13 @@ class GlobalSearchViewModel(private val repository: WebtoonRepository) : ViewMod
             }
         }
         
-        // Populate source count from active extensions
         viewModelScope.launch {
             repository.extensionManager.installedExtensions.collect { sources ->
                 Log.d("GlobalSearchViewModel", "Active extensions updated: ${sources.size}")
+                if (!pinDefaultApplied && sources.any { it.isPinned }) {
+                    _filterPinned.value = true
+                    pinDefaultApplied = true
+                }
             }
         }
     }
@@ -75,12 +79,13 @@ class GlobalSearchViewModel(private val repository: WebtoonRepository) : ViewMod
         }
     }
 
-    // Internal search job tracking removed per request
+    private var searchJob: Job? = null
 
     fun onQueryChange(newQuery: String) {
         _query.value = newQuery
         // We no longer trigger search automatically as the user types
         if (newQuery.isEmpty()) {
+            searchJob?.cancel()
             _searchResults.value = emptyMap()
         }
     }
@@ -99,25 +104,28 @@ class GlobalSearchViewModel(private val repository: WebtoonRepository) : ViewMod
 
     fun search(query: String) {
         if (query.length < 2) return
-        viewModelScope.launch {
+        searchJob?.cancel()
+        searchJob = viewModelScope.launch {
             performSearch(query)
         }
     }
 
     private suspend fun performSearch(query: String) {
-        Log.e("RADIANT_DEBUG", "Search started for query: $query")
+        Log.d("GlobalSearchViewModel", "Search started for query: $query")
         _isSearching.value = true
         _error.value = null
 
         try {
-            // Get pre-loaded extensions from cache (INSTANT)
-            val allSources = repository.extensionManager.installedExtensions.value
-            val sources = if (_filterPinned.value) allSources.filter { it.isPinned } else allSources
-            Log.e("RADIANT_DEBUG", "ExtensionManager currently holds ${sources.size} target active extensions")
+            var allSources = repository.extensionManager.installedExtensions.value
+            var sources = if (_filterPinned.value) allSources.filter { it.isPinned } else allSources
+            Log.d("GlobalSearchViewModel", "Active sources before reload: ${sources.size}")
 
-            // If we have no sources, try one automatic reload
+            // If we have no sources, try one automatic reload and re-read the list
             if (sources.isEmpty() && !_filterPinned.value) {
                 repository.extensionManager.refreshSources()
+                allSources = repository.extensionManager.installedExtensions.value
+                sources = allSources
+                Log.d("GlobalSearchViewModel", "Active sources after reload: ${sources.size}")
             }
 
             val initialResults = sources.associate {
@@ -131,19 +139,19 @@ class GlobalSearchViewModel(private val repository: WebtoonRepository) : ViewMod
                 )
             }
             _searchResults.value = initialResults
-            
+
             // Search only targeted sources
             repository.searchAllStreaming(query, sources).collect { result ->
                 _searchResults.update { current ->
                     current + (result.sourceId to result)
                 }
             }
-            
+
             // Collect any global errors from the final map if needed
             val results = _searchResults.value.values.toList()
             val successfulResults = results.filter { it.webtoons.isNotEmpty() }
             val sourceErrors = results.filter { it.webtoons.isEmpty() && it.error != null }
-            
+
             if (successfulResults.isEmpty()) {
                 if (sourceErrors.isNotEmpty()) {
                     val errorSummary = sourceErrors.joinToString("\n") { "${it.sourceName}: ${it.error}" }
@@ -158,11 +166,11 @@ class GlobalSearchViewModel(private val repository: WebtoonRepository) : ViewMod
                 }
             }
         } catch (e: kotlinx.coroutines.CancellationException) {
-            // SILENTLY IGNORE. The user just typed another letter. 
+            // SILENTLY IGNORE. The user just typed another letter.
             // Do NOT push an error state to the UI.
-            throw e 
+            throw e
         } catch (e: Exception) {
-            Log.e("RADIANT_DEBUG", "Search crashed: ${e.message}", e)
+            Log.e("GlobalSearchViewModel", "Search crashed: ${e.message}", e)
             _error.value = "Search failed: ${e.localizedMessage}"
             _searchResults.value = emptyMap()
         } finally {
@@ -171,7 +179,8 @@ class GlobalSearchViewModel(private val repository: WebtoonRepository) : ViewMod
     }
 
     fun refreshSources() {
-        viewModelScope.launch {
+        searchJob?.cancel()
+        searchJob = viewModelScope.launch {
             repository.extensionManager.refreshSources()
             if (_query.value.length >= 2) {
                 performSearch(_query.value)

@@ -3,6 +3,7 @@ package eu.kanade.tachiyomi.source
 import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
+import eu.kanade.tachiyomi.source.model.SMangaUpdate
 import rx.Observable
 
 /**
@@ -45,6 +46,22 @@ interface Source {
     @Suppress("DEPRECATION")
     suspend fun getPageList(chapter: SChapter): List<Page> {
         return fetchPageList(chapter).toBlocking().first()
+    }
+
+    /**
+     * Modern combined suspend contract (mirrors current Mihon/Keiyoushi extensions-lib). Some
+     * newer extensions fetch manga details and chapters together and override this directly
+     * instead of the separate [getMangaDetails]/[getChapterList] methods above.
+     */
+    suspend fun getMangaUpdate(
+        manga: SManga,
+        chapters: List<SChapter>,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): SMangaUpdate {
+        val updatedManga = if (fetchDetails) getMangaDetails(manga) else manga
+        val updatedChapters = if (fetchChapters) getChapterList(manga) else chapters
+        return SMangaUpdate(updatedManga, updatedChapters)
     }
 
     @Deprecated("Use the non-RxJava API instead", ReplaceWith("getMangaDetails"))

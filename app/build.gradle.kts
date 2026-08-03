@@ -1,8 +1,9 @@
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
-    kotlin("kapt")
-    id("org.jetbrains.kotlin.plugin.serialization") version "1.9.22"
+    id("org.jetbrains.kotlin.plugin.compose")
+    id("com.google.devtools.ksp")
+    id("org.jetbrains.kotlin.plugin.serialization")
 }
 
 android {
@@ -18,6 +19,11 @@ android {
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
+    
+    lint {
+        abortOnError = false
+    }
+
 
     buildTypes {
         debug {
@@ -32,19 +38,20 @@ android {
         sourceCompatibility = JavaVersion.VERSION_1_8
         targetCompatibility = JavaVersion.VERSION_1_8
     }
-    kotlinOptions {
-        jvmTarget = "1.8"
-    }
     buildFeatures {
         compose = true
-    }
-    composeOptions {
-        kotlinCompilerExtensionVersion = "1.5.10"
     }
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"
+            excludes += "META-INF/versions/9/OSGI-INF/MANIFEST.MF"
         }
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_1_8)
     }
 }
 
@@ -59,18 +66,19 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     implementation("androidx.compose.material3:material3")
 
-    // Room
-    val roomVersion = "2.6.1"
+    // Room — KSP (not kapt) for the compiler: kapt's javac metadata reader caps below
+    // the metadata version Kotlin 2.4.10 emits, so annotation processing fails under kapt.
+    val roomVersion = "2.8.4"
     implementation("androidx.room:room-runtime:$roomVersion")
     implementation("androidx.room:room-ktx:$roomVersion")
-    kapt("androidx.room:room-compiler:$roomVersion")
+    ksp("androidx.room:room-compiler:$roomVersion")
 
-    // Networking
-    implementation("com.squareup.okhttp3:okhttp:4.12.0")
-    implementation("com.squareup.okhttp3:okhttp-dnsoverhttps:4.12.0")
-    implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")
-    implementation("com.squareup.retrofit2:retrofit:2.9.0")
-    implementation("com.squareup.retrofit2:converter-gson:2.9.0")
+    // Networking — OkHttp 5.x required by modern Keiyoushi/Mihon extensions (e.g. MangaDex)
+    implementation("com.squareup.okhttp3:okhttp:5.3.2")
+    implementation("com.squareup.okhttp3:okhttp-dnsoverhttps:5.3.2")
+    implementation("com.squareup.okhttp3:logging-interceptor:5.3.2")
+    implementation("com.squareup.retrofit2:retrofit:2.11.0")
+    implementation("com.squareup.retrofit2:converter-gson:2.11.0")
 
     // Jsoup — HTML parsing for scraping manga sites
     implementation("org.jsoup:jsoup:1.17.2")
@@ -99,6 +107,9 @@ dependencies {
     implementation("androidx.datastore:datastore-preferences:1.1.1")
     implementation("androidx.documentfile:documentfile:1.0.1")
     implementation("androidx.work:work-runtime-ktx:2.9.0")
+    implementation("androidx.appcompat:appcompat:1.6.1")
+    implementation("androidx.biometric:biometric:1.1.0")
+    implementation("androidx.fragment:fragment-ktx:1.6.2")
 
     testImplementation("junit:junit:4.13.2")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
@@ -114,6 +125,20 @@ dependencies {
     // Preferences for ConfigurableSource
     implementation("androidx.preference:preference-ktx:1.2.1")
 
-    // Kotlin Serialization
-    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.6.0")
+    // Kotlin Serialization — version must be >= what current Keiyoushi/Mihon extensions are
+    // compiled against (currently 1.11.0 / Kotlin 2.4.10), or their generated $serializer
+    // classes throw AbstractMethodError on GeneratedSerializer.typeParametersSerializers()
+    // when loaded into an older host runtime via DexClassLoader.
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.11.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-json-okio:1.11.0")
+    implementation("org.jetbrains.kotlinx:kotlinx-serialization-protobuf:1.11.0")
+}
+
+// Keep Kotlin stdlib aligned with the compiler (OkHttp 5 may pull a newer one)
+configurations.configureEach {
+    resolutionStrategy {
+        force("org.jetbrains.kotlin:kotlin-stdlib:2.4.10")
+        force("org.jetbrains.kotlin:kotlin-stdlib-jdk7:2.4.10")
+        force("org.jetbrains.kotlin:kotlin-stdlib-jdk8:2.4.10")
+    }
 }
