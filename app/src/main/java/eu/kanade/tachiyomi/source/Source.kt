@@ -4,7 +4,10 @@ import eu.kanade.tachiyomi.source.model.Page
 import eu.kanade.tachiyomi.source.model.SChapter
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.model.SMangaUpdate
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import rx.Observable
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * A basic interface for creating a source. It could be an online source, a local source, etc.
@@ -59,9 +62,22 @@ interface Source {
         fetchDetails: Boolean,
         fetchChapters: Boolean,
     ): SMangaUpdate {
-        val updatedManga = if (fetchDetails) getMangaDetails(manga) else manga
-        val updatedChapters = if (fetchChapters) getChapterList(manga) else chapters
-        return SMangaUpdate(updatedManga, updatedChapters)
+        val mutex = mangaUpdateMutexes.getOrPut(mangaUpdateLockKey(id, manga.url)) { Mutex() }
+        return mutex.withLock {
+            val updatedManga = if (fetchDetails) getMangaDetails(manga) else manga
+            val updatedChapters = if (fetchChapters) getChapterList(manga) else chapters
+            SMangaUpdate(updatedManga, updatedChapters)
+        }
+    }
+
+    companion object {
+        private val mangaUpdateMutexes = ConcurrentHashMap<Long, Mutex>()
+
+        private fun mangaUpdateLockKey(sourceId: Long, mangaUrl: String): Long {
+            var hash = sourceId
+            hash = 31 * hash + mangaUrl.hashCode()
+            return hash.toLong()
+        }
     }
 
     @Deprecated("Use the non-RxJava API instead", ReplaceWith("getMangaDetails"))

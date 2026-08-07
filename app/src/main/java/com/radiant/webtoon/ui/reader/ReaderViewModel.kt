@@ -92,15 +92,8 @@ class ReaderViewModel(
 
             // Auto-delete downloaded chapter if enabled
             if (settingsManager.autoDeleteRead.first()) {
-                val task = repository.getDownloadTask(chapterId, currentSourceId)
-                if (task?.status == com.radiant.webtoon.core.database.DownloadStatus.COMPLETED) {
-                    task.localPath?.let { path ->
-                        runCatching {
-                            val f = java.io.File(path)
-                            if (f.isDirectory) f.deleteRecursively() else f.delete()
-                        }
-                    }
-                    repository.deleteDownload(chapterId, currentSourceId)
+                if (repository.isChapterDownloaded(currentSourceId, chapterId)) {
+                    repository.deleteDownloadedChapter(chapterId, currentSourceId)
                 }
             }
 
@@ -178,10 +171,10 @@ class ReaderViewModel(
                     }
                 }
 
-                // Check for local download first
-                val download = repository.getDownloadTask(chapterId, sourceId)
-                if (download?.status == com.radiant.webtoon.core.database.DownloadStatus.COMPLETED && download.localPath != null) {
-                    val localPages = loadLocalPages(download.localPath)
+                // Check indexed local download first (no filesystem scan)
+                val downloaded = repository.getDownloadedChapter(sourceId, chapterId)
+                if (downloaded != null) {
+                    val localPages = loadLocalPages(downloaded.localDirectory)
                     if (localPages.isNotEmpty()) {
                         _pages.value = localPages
                         _isLoading.value = false

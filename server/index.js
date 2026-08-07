@@ -1,90 +1,191 @@
-const express = require('express');
-const cors = require('cors');
-const bodyParser = require('body-parser');
-const axios = require('axios');
+import express from 'express';
+import cors from 'cors';
+import bodyParser from 'body-parser';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+import {
+  defaultExtensionRepository,
+  ExtensionBundleError,
+  isScrapingSourceMethod,
+  normalizeRepoUrl,
+  SourceExecutionError,
+} from '@radiant/extension-sdk';
 
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = 3001;
 
 app.use(cors());
 app.use(bodyParser.json());
 
-// In-memory data storage (simulating a database)
 let settings = {
-    repoUrl: ""
+  repoUrl: '',
 };
-let extensions = [
-    { id: "picsum", name: "Picsum", lang: "EN", version: "1.0.0" },
-    { id: "mock", name: "Mock (Local)", lang: "EN", version: "1.0.0" }
-];
-let repoExtensions = [];
+
 let library = [];
 
-// Extensions Endpoints
-app.get('/extensions', (req, res) => {
-    res.json(extensions);
+function catalogPayload() {
+  const state = defaultExtensionRepository.getState();
+  return {
+    available: state.available,
+    installed: state.installed,
+    installingId: state.installingId,
+    isLoading: state.isLoading,
+    error: state.error,
+    installError: state.installError,
+    repoUrl: state.repoUrl,
+    repoName: state.repoName,
+    lastFetchedAt: state.lastFetchedAt,
+  };
+}
+
+// ─── Extension catalog ──────────────────────────────────────────────────────
+
+app.get('/extensions/available', (_req, res) => {
+  res.json(catalogPayload());
 });
 
-app.get('/extensions/repo', async (req, res) => {
-    if (!settings.repoUrl) {
-        return res.json({ name: "Default Repo", description: "No repo URL set", extensions: [] });
-    }
-    
-    try {
-        const response = await axios.get(settings.repoUrl);
-        repoExtensions = response.data.extensions || [];
-        res.json(response.data);
-    } catch (e) {
-        res.status(500).json({ error: "Failed to fetch repository: " + e.message });
-    }
+app.post('/extensions/repo/refresh', async (req, res) => {
+  const repoUrl = req.body?.repoUrl ?? req.body?.url ?? settings.repoUrl;
+  if (!repoUrl) {
+    return res.status(400).json({ error: 'repoUrl is required' });
+  }
+
+  try {
+    settings.repoUrl = normalizeRepoUrl(repoUrl);
+    await defaultExtensionRepository.fetchIndex(settings.repoUrl);
+    res.json(catalogPayload());
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to refresh repository';
+    res.status(500).json({ error: message, ...catalogPayload() });
+  }
 });
 
-app.post('/extensions/install', (req, res) => {
-    const { repoId } = req.body;
-    const ext = repoExtensions.find(e => e.id === repoId) || 
-               extensions.find(e => e.id === repoId);
-    
-    if (ext && !extensions.find(e => e.id === repoId)) {
-        extensions.push(ext);
-    }
-    res.json({ success: true });
+app.get('/extensions/repo', async (_req, res) => {
+  if (!settings.repoUrl) {
+    return res.json({
+      name: 'Default Repo',
+      description: 'No repo URL set',
+      extensions: [],
+      ...catalogPayload(),
+    });
+  }
+
+  try {
+    await defaultExtensionRepository.fetchIndex(settings.repoUrl);
+    const state = defaultExtensionRepository.getState();
+    res.json({
+      name: state.repoName ?? 'Extension Repository',
+      description: '',
+      extensions: state.available,
+      ...catalogPayload(),
+    });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Failed to fetch repository';
+    res.status(500).json({ error: message, ...catalogPayload() });
+  }
+});
+
+// ─── Installed extensions ───────────────────────────────────────────────────
+
+app.get('/extensions', (_req, res) => {
+  res.json(defaultExtensionRepository.getInstalledExtensions());
+});
+
+app.post('/extensions/install', async (req, res) => {
+  const extensionId = req.body?.repoId ?? req.body?.extensionId ?? req.body?.id;
+  if (!extensionId) {
+    return res.status(400).json({ error: 'extensionId is required' });
+  }
+
+  try {
+    const result = await defaultExtensionRepository.installExtension(extensionId);
+    res.json({
+      success: true,
+      installedId: result.extension.id,
+      sourceId: result.sourceId,
+      extension: result.extension,
+      ...catalogPayload(),
+    });
+  } catch (error) {
+    const status = error instanceof ExtensionBundleError && error.code === 'already_installed' ? 409 : 500;
+    const message = error instanceof Error ? error.message : 'Install failed';
+    res.status(status).json({ ...catalogPayload(), success: false, error: message });
+  }
+});
+
+/** Invoke a Source method on an installed JS extension (smoke-test / proxy API). */
+app.post('/extensions/:id/run', async (req, res) => {
+  const extensionId = req.params.id;
+  const source = defaultExtensionRepository.getSource(extensionId);
+  if (!source) {
+    return res.status(404).json({ error: 'Installed source not found' });
+  }
+
+  const { method, args = [] } = req.body ?? {};
+  if (typeof method !== 'string') {
+    return res.status(400).json({ error: 'method must name a function on the Source instance' });
+  }
+
+  try {
+    const value = isScrapingSourceMethod(method)
+      ? await defaultExtensionRepository.runSourceMethod(extensionId, method, args)
+      : await (() => {
+          if (typeof source[method] !== 'function') {
+            throw new Error('method must name a function on the Source instance');
+          }
+          return source[method](...args);
+        })();
+    res.json({ success: true, value });
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Source invocation failed';
+    const status =
+      error instanceof SourceExecutionError && error.code === 'timeout' ? 504 : 500;
+    res.status(status).json({ success: false, error: message });
+  }
 });
 
 app.delete('/extensions/:id', (req, res) => {
-    extensions = extensions.filter(e => e.id !== req.params.id);
-    res.json({ success: true });
+  defaultExtensionRepository.uninstallExtension(req.params.id);
+  res.json({ success: true, ...catalogPayload() });
 });
 
-// Library Endpoints
-app.get('/library', (req, res) => {
-    res.json(library);
+// ─── Library ────────────────────────────────────────────────────────────────
+
+app.get('/library', (_req, res) => {
+  res.json(library);
 });
 
 app.post('/library', (req, res) => {
-    const { sourceId, webtoonId } = req.body;
-    if (!library.find(i => i.id === webtoonId)) {
-        library.push({ id: webtoonId, sourceId });
-    }
-    res.json({ success: true });
+  const { sourceId, webtoonId } = req.body;
+  if (!library.find((item) => item.id === webtoonId)) {
+    library.push({ id: webtoonId, sourceId });
+  }
+  res.json({ success: true });
 });
 
 app.delete('/library/:extId/:webtoonId', (req, res) => {
-    library = library.filter(i => !(i.id === req.params.webtoonId && i.sourceId === req.params.extId));
-    res.json({ success: true });
+  library = library.filter(
+    (item) => !(item.id === req.params.webtoonId && item.sourceId === req.params.extId),
+  );
+  res.json({ success: true });
 });
 
 app.post('/library/sync', (req, res) => {
-    library = req.body;
-    res.json({ success: true });
+  library = req.body;
+  res.json({ success: true });
 });
 
-// Settings Endpoints
+// ─── Settings ───────────────────────────────────────────────────────────────
+
 app.patch('/settings', (req, res) => {
-    settings = { ...settings, ...req.body };
-    console.log("Settings updated:", settings);
-    res.json({ success: true });
+  settings = { ...settings, ...req.body };
+  console.log('Settings updated:', settings);
+  res.json({ success: true });
 });
+
+app.use('/fixtures', express.static(path.join(__dirname, 'fixtures')));
 
 app.listen(PORT, '0.0.0.0', () => {
-    console.log(`WebtoonReader Backend listening at http://0.0.0.0:${PORT}`);
+  console.log(`WebtoonReader Backend listening at http://0.0.0.0:${PORT}`);
 });

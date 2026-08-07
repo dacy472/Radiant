@@ -15,6 +15,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
+import com.radiant.webtoon.core.model.SourceSearchStatus
 import com.radiant.webtoon.core.model.Webtoon
 import com.radiant.webtoon.ui.components.WebtoonThumbnailCard
 
@@ -33,13 +34,13 @@ fun SearchScreen(
             return GlobalSearchViewModel(repository) as T
         }
     })
-    val filterPinned by viewModel.filterPinned.collectAsState()
     val filterHasResults by viewModel.filterHasResults.collectAsState()
     val migrateFromManga by viewModel.migrateFromManga.collectAsState()
     
     val query by viewModel.query.collectAsState()
     val results by viewModel.searchResults.collectAsState()
-    val sources by viewModel.activeSources.collectAsState()
+    val searchableSources by viewModel.searchableSources.collectAsState()
+    val installedCount by viewModel.installedCount.collectAsState()
     val isSearching by viewModel.isSearching.collectAsState()
     val uiError by viewModel.error.collectAsState()
 
@@ -88,7 +89,7 @@ fun SearchScreen(
                     TextField(
                         value = query,
                         onValueChange = { viewModel.onQueryChange(it) },
-                        placeholder = { Text("Search all sources...") },
+                        placeholder = { Text("Search pinned sources...") },
                         modifier = Modifier.fillMaxWidth(),
                         keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
                             imeAction = androidx.compose.ui.text.input.ImeAction.Search
@@ -140,27 +141,16 @@ fun SearchScreen(
                 horizontalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 FilterChip(
-                    selected = !filterPinned,
-                    onClick = { if (filterPinned) viewModel.toggleFilterPinned() },
-                    label = { Text("All") }
-                )
-                FilterChip(
-                    selected = filterPinned,
-                    onClick = { if (!filterPinned) viewModel.toggleFilterPinned() },
-                    label = { Text("Pinned") }
-                )
-                FilterChip(
                     selected = filterHasResults,
                     onClick = { viewModel.toggleFilterHasResults() },
                     label = { Text("Has results") }
                 )
             }
 
-            val displaySources = sources.filter { source ->
-                if (filterPinned && !source.isPinned) return@filter false
+            val displaySources = searchableSources.filter { source ->
                 if (filterHasResults) {
                     val sourceResult = results.find { it.sourceId == source.id }
-                    if (sourceResult == null || sourceResult.webtoons.isEmpty() || sourceResult.error != null) {
+                    if (sourceResult == null || sourceResult.webtoons.isEmpty() || sourceResult.status == SourceSearchStatus.Error) {
                         return@filter false
                     }
                 }
@@ -168,8 +158,12 @@ fun SearchScreen(
             }
 
             if (displaySources.isEmpty()) {
-                if (sources.isEmpty()) {
-                    NoSourcesInstalled(onRefresh = { viewModel.refreshSources() })
+                if (searchableSources.isEmpty() && !isSearching) {
+                    if (installedCount == 0) {
+                        NoSourcesInstalled(onRefresh = { viewModel.refreshSources() })
+                    } else {
+                        SearchPlaceholder("No pinned sources. Pin extensions in Browse to search them.")
+                    }
                 } else if (filterHasResults && !isSearching) {
                     SearchPlaceholder("No results matching filters.")
                 }
@@ -180,7 +174,7 @@ fun SearchScreen(
                 ) {
                     items(displaySources) { source ->
                         val sourceResult = results.find { it.sourceId == source.id }
-                        val isSourceFetching = isSearching && (sourceResult == null || (sourceResult.webtoons.isEmpty() && sourceResult.error == null))
+                        val isSourceLoading = sourceResult?.status == SourceSearchStatus.Loading
                         
                         Column {
                             // ── Source Header Row ──
@@ -213,7 +207,7 @@ fun SearchScreen(
                                     }
                                 }
 
-                                if (isSourceFetching) {
+                                if (isSourceLoading) {
                                     CircularProgressIndicator(
                                         modifier = Modifier.size(16.dp),
                                         strokeWidth = 2.dp,
@@ -228,7 +222,7 @@ fun SearchScreen(
 
                             if (query.length >= 2) {
                                 if (sourceResult != null) {
-                                    if (sourceResult.webtoons.isEmpty() && !isSourceFetching) {
+                                    if (sourceResult.webtoons.isEmpty() && !isSourceLoading) {
                                         // ── No results / error per source ──
                                         Text(
                                             text = sourceResult.error ?: "No results found",
@@ -253,7 +247,7 @@ fun SearchScreen(
                                                             if (migrateFromManga != null) {
                                                                 showMigrationDialog = source.id to webtoon
                                                             } else {
-                                                                onWebtoonClick(source.id, webtoon.id)
+                                                                onWebtoonClick(source.id, webtoon.url?.takeIf { it.isNotBlank() } ?: webtoon.id)
                                                             }
                                                         },
                                                         sourceId = source.id

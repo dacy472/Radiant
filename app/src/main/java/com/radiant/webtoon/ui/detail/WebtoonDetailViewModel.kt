@@ -6,28 +6,37 @@ import com.radiant.webtoon.core.database.DownloadStatus
 import com.radiant.webtoon.core.database.Manga
 import com.radiant.webtoon.core.database.MangaDao
 import com.radiant.webtoon.core.database.ChapterDao
+import com.radiant.webtoon.core.local.LocalSourceIds
 import com.radiant.webtoon.core.model.Chapter
 import com.radiant.webtoon.core.model.Webtoon
 import com.radiant.webtoon.core.repository.WebtoonRepository
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.SharedFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
-import kotlinx.coroutines.flow.map
-import kotlinx.coroutines.flow.stateIn
+import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 
 class WebtoonDetailViewModel(
     private val repository: WebtoonRepository,
     private val mangaDao: MangaDao,
     private val chapterDao: ChapterDao,
     private val downloadDao: com.radiant.webtoon.core.database.DownloadDao? = null,
+    private val downloadedChapterDao: com.radiant.webtoon.core.database.DownloadedChapterDao? = null,
     // Legacy param still accepted so the Factory compiles — will be removed when AppDatabase is retired
     private val webtoonDao: com.radiant.webtoon.core.database.WebtoonDao? = null
 ) : ViewModel() {
 
     private var currentSourceId: String = ""
     private var currentWebtoonId: String = ""
+    private var repairAttempted = false
+    private val refreshMutex = Mutex()
+    private var activeRefresh: kotlinx.coroutines.CompletableDeferred<Unit>? = null
 
     // ── Database-first state ──
 
@@ -56,6 +65,12 @@ class WebtoonDetailViewModel(
     private val _isRefreshing = MutableStateFlow(false)
     val isRefreshing: StateFlow<Boolean> = _isRefreshing
 
+    private val _error = MutableStateFlow<String?>(null)
+    val error: StateFlow<String?> = _error
+
+    private val _refreshToastMessage = MutableSharedFlow<String>(extraBufferCapacity = 1)
+    val refreshToastMessage: SharedFlow<String> = _refreshToastMessage.asSharedFlow()
+
     private val _downloadTasks = MutableStateFlow<Map<String, DownloadStatus>>(emptyMap())
     val downloadTasks: StateFlow<Map<String, DownloadStatus>> = _downloadTasks
 
@@ -67,6 +82,8 @@ class WebtoonDetailViewModel(
     fun loadWebtoon(sourceId: String, webtoonId: String) {
         currentSourceId = sourceId
         currentWebtoonId = webtoonId
+        repairAttempted = false
+        _error.value = null
         _isLoading.value = true
 
         viewModelScope.launch {
@@ -109,9 +126,24 @@ class WebtoonDetailViewModel(
 
         // ── Reactively observe download statuses so icons update live ──
         viewModelScope.launch {
-            downloadDao?.getAllFlow()?.collect { tasks ->
-                _downloadTasks.value = tasks.associate { it.chapterId to it.status }
-            } ?: updateDownloadStatuses()
+            val dao = downloadDao
+            val indexDao = downloadedChapterDao
+            if (dao != null && indexDao != null) {
+                combine(
+                    dao.getAllFlow(),
+                    indexDao.getByWebtoonFlow(sourceId, webtoonId),
+                ) { tasks, downloaded ->
+                    val map = tasks
+                        .filter { it.webtoonId == webtoonId && it.sourceId == sourceId }
+                        .filter { it.status != DownloadStatus.COMPLETED }
+                        .associate { it.chapterId to it.status }
+                        .toMutableMap()
+                    downloaded.forEach { map[it.chapterId] = DownloadStatus.COMPLETED }
+                    map
+                }.collect { _downloadTasks.value = it }
+            } else {
+                updateDownloadStatuses()
+            }
         }
     }
 
@@ -122,67 +154,133 @@ class WebtoonDetailViewModel(
     fun refreshFromNetwork() {
         val sourceId = currentSourceId.ifEmpty { return }
         val webtoonId = currentWebtoonId.ifEmpty { return }
-        _isRefreshing.value = true
 
         viewModelScope.launch(Dispatchers.IO) {
-            try {
-                val (detail, modelChapters) = repository.getWebtoonDetailAndChapters(sourceId, webtoonId)
-                android.util.Log.d("DetailVM", "Network fetch complete: ${detail.title}, ${modelChapters.size} chapters")
+            val existing = activeRefresh
+            if (existing != null && existing.isActive) {
+                existing.await()
+                return@launch
+            }
 
-                // Upsert webtoon into Room — preserve existing favorite status
-                val existing = mangaDao.getManga(webtoonId, sourceId)
-                val isFav = existing?.favorite ?: false
-                mangaDao.insert(
-                    Manga(
-                        url = detail.id,
-                        source = sourceId,
-                        title = detail.title,
-                        author = detail.author,
-                        description = detail.description,
-                        status = detail.status,
-                        thumbnail_url = detail.thumbnail,
-                        genre = detail.genres.joinToString(", "),
-                        favorite = isFav,
-                        initialized = true,
-                        last_update = System.currentTimeMillis()
-                    )
-                )
-
-                // Upsert chapters into Room, merging with any existing row so we never wipe
-                // state (date_fetch, read, bookmark, last_page_read) that LibraryUpdateWorker
-                // or the reader already wrote — REPLACE on conflict would otherwise blow away
-                // that state every time this screen is opened/refreshed.
-                val existingChapters = chapterDao.getChapters(webtoonId).associateBy { it.url }
-                val dbChapters = modelChapters.map { ch ->
-                    val prior = existingChapters[ch.id]
-                    com.radiant.webtoon.core.database.Chapter(
-                        url = ch.id,
-                        manga_id = webtoonId,
-                        name = ch.title,
-                        scanlator = prior?.scanlator,
-                        read = prior?.read ?: false,
-                        bookmark = prior?.bookmark ?: false,
-                        last_page_read = prior?.last_page_read ?: 0,
-                        // Preserve the fetch timestamp for chapters we already knew about;
-                        // genuinely new chapters get 0 so they don't flood the Updates screen
-                        // (only LibraryUpdateWorker stamps a real date_fetch for new chapters).
-                        date_fetch = prior?.date_fetch ?: 0L,
-                        date_upload = prior?.date_upload ?: 0L,
-                        chapter_number = ch.number?.toFloat() ?: -1f,
-                        source = sourceId,
-                    )
+            refreshMutex.withLock {
+                val inFlight = activeRefresh
+                if (inFlight != null && inFlight.isActive) {
+                    inFlight.await()
+                    return@withLock
                 }
-                chapterDao.insertAll(dbChapters)
-                android.util.Log.d("DetailVM", "Upserted ${dbChapters.size} chapters into Room")
 
-            } catch (e: Exception) {
-                android.util.Log.e("DetailVM", "Network refresh failed: ${e.message}")
-                // Silently keep serving cached data
-            } finally {
-                _isRefreshing.value = false
-                _isLoading.value = false
+                val deferred = kotlinx.coroutines.CompletableDeferred<Unit>()
+                activeRefresh = deferred
+                try {
+                    performNetworkRefresh(sourceId, webtoonId)
+                    deferred.complete(Unit)
+                } catch (e: Throwable) {
+                    deferred.completeExceptionally(e)
+                } finally {
+                    if (activeRefresh === deferred) {
+                        activeRefresh = null
+                    }
+                }
             }
         }
+    }
+
+    private suspend fun performNetworkRefresh(sourceId: String, webtoonId: String) {
+        _isRefreshing.value = true
+        try {
+            if (sourceId == LocalSourceIds.LOCAL_SOURCE_ID) {
+                repository.refreshLocalLibrary()
+                return
+            }
+            val (detail, modelChapters) = repository.getWebtoonDetailAndChapters(sourceId, webtoonId)
+            android.util.Log.d("DetailVM", "Network fetch complete: ${detail.title}, ${modelChapters.size} chapters")
+            _error.value = null
+
+            // Upsert webtoon into Room — preserve existing favorite status
+            val existing = mangaDao.getManga(webtoonId, sourceId)
+            val isFav = existing?.favorite ?: false
+            mangaDao.insert(
+                Manga(
+                    url = detail.id,
+                    source = sourceId,
+                    title = detail.title,
+                    author = detail.author,
+                    description = detail.description,
+                    status = detail.status,
+                    thumbnail_url = detail.thumbnail,
+                    genre = detail.genres.joinToString(", "),
+                    favorite = isFav,
+                    initialized = true,
+                    last_update = System.currentTimeMillis()
+                )
+            )
+
+            val existingChapters = chapterDao.getChapters(webtoonId).associateBy { it.url }
+            val dbChapters = modelChapters.map { ch ->
+                val prior = existingChapters[ch.id]
+                com.radiant.webtoon.core.database.Chapter(
+                    url = ch.id,
+                    manga_id = webtoonId,
+                    name = ch.title,
+                    scanlator = prior?.scanlator,
+                    read = prior?.read ?: false,
+                    bookmark = prior?.bookmark ?: false,
+                    last_page_read = prior?.last_page_read ?: 0,
+                    date_fetch = prior?.date_fetch ?: 0L,
+                    date_upload = prior?.date_upload ?: 0L,
+                    chapter_number = ch.number?.toFloat() ?: -1f,
+                    source = sourceId,
+                )
+            }
+            chapterDao.insertAll(dbChapters)
+            android.util.Log.d("DetailVM", "Upserted ${dbChapters.size} chapters into Room")
+        } catch (e: Throwable) {
+            if (e is kotlinx.coroutines.CancellationException) throw e
+            if (!repairAttempted && isSerializationFailure(e)) {
+                repairAttempted = true
+                val repaired = repository.extensionManager.repairSourceAfterSerializationFailure(sourceId)
+                if (repaired) {
+                    performNetworkRefresh(sourceId, webtoonId)
+                    return
+                }
+            }
+            handleRefreshFailure(e, sourceId, webtoonId)
+        } finally {
+            _isRefreshing.value = false
+            _isLoading.value = false
+        }
+    }
+
+    private suspend fun handleRefreshFailure(e: Throwable, sourceId: String, webtoonId: String) {
+        android.util.Log.e("DetailVM", "Network refresh failed: ${e.message}", e)
+        val hasOfflineData = restoreCachedOfflineData(sourceId, webtoonId)
+        if (hasOfflineData) {
+            _error.value = null
+            _refreshToastMessage.emit("Unable to refresh latest chapters")
+            return
+        }
+
+        val message = when (e) {
+            is kotlinx.coroutines.TimeoutCancellationException -> "Timed out loading title details"
+            else -> e.localizedMessage?.takeIf { it.isNotBlank() } ?: "Failed to load title details"
+        }
+        _error.value = message
+    }
+
+    /** Re-hydrate UI from Room after a failed network refresh. */
+    private suspend fun restoreCachedOfflineData(sourceId: String, webtoonId: String): Boolean {
+        val cached = mangaDao.getManga(webtoonId, sourceId)
+        val cachedChapters = chapterDao.getChapters(webtoonId)
+
+        if (cached != null) {
+            _webtoon.value = cached.toWebtoon()
+            _isFavorite.value = cached.favorite
+        }
+        if (cachedChapters.isNotEmpty()) {
+            _chapters.value = cachedChapters.map { it.toModelChapter() }
+        }
+
+        return cached != null || cachedChapters.isNotEmpty()
     }
 
     /** Pull-to-refresh handler from the UI. */
@@ -190,10 +288,22 @@ class WebtoonDetailViewModel(
 
     private suspend fun updateDownloadStatuses() {
         val allDownloads = repository.getDownloads()
-        _downloadTasks.value = allDownloads.associate { it.chapterId to it.status }
+        val downloadedIds = if (currentSourceId.isNotEmpty() && currentWebtoonId.isNotEmpty()) {
+            repository.getDownloadedChapterIds(currentSourceId, currentWebtoonId).toSet()
+        } else {
+            emptySet()
+        }
+        _downloadTasks.value = buildMap {
+            allDownloads
+                .filter { it.webtoonId == currentWebtoonId && it.sourceId == currentSourceId }
+                .filter { it.status != DownloadStatus.COMPLETED }
+                .forEach { put(it.chapterId, it.status) }
+            downloadedIds.forEach { put(it, DownloadStatus.COMPLETED) }
+        }
     }
 
     fun downloadChapter(context: android.content.Context, chapterId: String, chapterTitle: String) {
+        if (currentSourceId == LocalSourceIds.LOCAL_SOURCE_ID) return
         val webtoon = _webtoon.value ?: return
         val sourceId = currentSourceId
 
@@ -214,6 +324,7 @@ class WebtoonDetailViewModel(
      * Queue every chapter that is not already completed, oldest → newest (chapter 1 → last).
      */
     fun downloadAllMissing(context: android.content.Context) {
+        if (currentSourceId == LocalSourceIds.LOCAL_SOURCE_ID) return
         viewModelScope.launch {
             val webtoon = _webtoon.value ?: return@launch
             val statuses = _downloadTasks.value
@@ -225,6 +336,7 @@ class WebtoonDetailViewModel(
     }
 
     fun downloadUnread(context: android.content.Context) {
+        if (currentSourceId == LocalSourceIds.LOCAL_SOURCE_ID) return
         viewModelScope.launch {
             val webtoon = _webtoon.value ?: return@launch
             val chapters = chapterDao.getChapters(currentWebtoonId)
@@ -235,6 +347,7 @@ class WebtoonDetailViewModel(
     }
 
     fun downloadNext(context: android.content.Context, count: Int = 5) {
+        if (currentSourceId == LocalSourceIds.LOCAL_SOURCE_ID) return
         viewModelScope.launch {
             val webtoon = _webtoon.value ?: return@launch
             val chapters = chapterDao.getChapters(currentWebtoonId)
@@ -247,7 +360,7 @@ class WebtoonDetailViewModel(
 
     /** Queues a caller-chosen subset of chapters (e.g. multi-select), oldest → newest. */
     fun downloadSelected(context: android.content.Context, chapterIds: Set<String>) {
-        if (chapterIds.isEmpty()) return
+        if (chapterIds.isEmpty() || currentSourceId == LocalSourceIds.LOCAL_SOURCE_ID) return
         viewModelScope.launch {
             val webtoon = _webtoon.value ?: return@launch
             val chapters = chapterDao.getChapters(currentWebtoonId)
@@ -293,7 +406,7 @@ class WebtoonDetailViewModel(
         val app = context.applicationContext as com.radiant.webtoon.WebtoonApplication
         app.downloadQueueManager.addDownloads(
             chapters.map { ch ->
-                com.radiant.webtoon.core.service.DownloadQueueManager.DownloadRequest(
+                com.radiant.webtoon.core.download.DownloadManager.DownloadRequest(
                     chapterId = ch.url,
                     sourceId = currentSourceId,
                     webtoonId = webtoon.id,
@@ -351,4 +464,14 @@ class WebtoonDetailViewModel(
         number = chapter_number.toDouble().takeIf { it >= 0 },
         read = read,
     )
+
+    private fun isSerializationFailure(error: Throwable): Boolean {
+        var current: Throwable? = error
+        while (current != null) {
+            if (current is kotlinx.serialization.MissingFieldException) return true
+            if (current.javaClass.name.contains("MissingFieldException")) return true
+            current = current.cause
+        }
+        return false
+    }
 }

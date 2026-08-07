@@ -73,7 +73,7 @@ fun WebtoonDetailScreen(
     val chapterDao = db.chapterDao()
     val viewModel: WebtoonDetailViewModel = viewModel(factory = object : androidx.lifecycle.ViewModelProvider.Factory {
         override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T {
-            return WebtoonDetailViewModel(repository, mangaDao, chapterDao, db.downloadDao()) as T
+            return WebtoonDetailViewModel(repository, mangaDao, chapterDao, db.downloadDao(), db.downloadedChapterDao()) as T
         }
     })
 
@@ -82,6 +82,7 @@ fun WebtoonDetailScreen(
     val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
     val isFavorite by viewModel.isFavorite.collectAsStateWithLifecycle()
     val isRefreshing by viewModel.isRefreshing.collectAsStateWithLifecycle()
+    val error by viewModel.error.collectAsStateWithLifecycle()
     var showMenu by remember { mutableStateOf(false) }
     var showTrackDialog by remember { mutableStateOf(false) }
     var selectionMode by remember { mutableStateOf(false) }
@@ -117,6 +118,12 @@ fun WebtoonDetailScreen(
 
     LaunchedEffect(sourceId, webtoonId) {
         viewModel.loadWebtoon(sourceId, webtoonId)
+    }
+
+    LaunchedEffect(Unit) {
+        viewModel.refreshToastMessage.collect { message ->
+            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+        }
     }
 
     // Pull-to-refresh state
@@ -242,7 +249,7 @@ fun WebtoonDetailScreen(
                     }
                 )
         ) {
-            if (isLoading) {
+            if (isLoading && webtoon == null && chapters.isEmpty()) {
                 CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
             } else {
                 LazyColumn(
@@ -252,6 +259,18 @@ fun WebtoonDetailScreen(
                 ) {
                     item {
                         WebtoonHeader(webtoon, sourceId, isFavorite, onToggleFavorite = { viewModel.toggleFavorite() })
+                    }
+                    error?.let { message ->
+                        if (webtoon == null && chapters.isEmpty()) {
+                            item {
+                                Text(
+                                    text = message,
+                                    color = MaterialTheme.colorScheme.error,
+                                    style = MaterialTheme.typography.bodyMedium,
+                                    modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
+                                )
+                            }
+                        }
                     }
                     item {
                         WebtoonActions(
@@ -419,7 +438,7 @@ fun WebtoonHeader(webtoon: Webtoon?, sourceId: String, isFavorite: Boolean, onTo
             )
         Column(modifier = Modifier.padding(start = 16.dp)) {
             Text(
-                text = webtoon?.title ?: "Loading...",
+                text = webtoon?.title ?: if (webtoon == null) "Loading..." else "Unknown title",
                 style = MaterialTheme.typography.titleLarge,
                 fontWeight = FontWeight.Bold,
                 maxLines = 2,

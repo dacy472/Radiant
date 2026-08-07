@@ -31,7 +31,8 @@ fun SettingsScreen(
     onSecurityClick: () -> Unit,
     onAboutClick: () -> Unit,
     onAdvancedClick: () -> Unit,
-    onStatsClick: () -> Unit = {}
+    onStatsClick: () -> Unit = {},
+    onUpcomingClick: () -> Unit = {},
 ) {
     Scaffold(
         topBar = {
@@ -77,7 +78,8 @@ fun SettingsScreen(
                         SettingsSubItem("Reader", "Reading mode, display, navigation", Icons.Default.MenuBook, onReaderClick),
                         SettingsSubItem("Downloads", "Download location", Icons.Default.FileDownload, onDownloadsClick),
                         SettingsSubItem("Tracking", "AniList and progress sync", Icons.Default.Bookmark, onTrackingClick),
-                        SettingsSubItem("Reading stats", "Weekly chapters and library totals", Icons.Default.BarChart, onStatsClick)
+                        SettingsSubItem("Reading stats", "Weekly chapters and library totals", Icons.Default.BarChart, onStatsClick),
+                        SettingsSubItem("Upcoming", "Chapters releasing in the next 7 days", Icons.Default.DateRange, onUpcomingClick),
                     )
                 )
             }

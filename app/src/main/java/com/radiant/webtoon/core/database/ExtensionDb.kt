@@ -26,7 +26,8 @@ data class InstalledExtensionEntity(
     @PrimaryKey val id: String, // Package Name
     val name: String,
     val isTrusted: Boolean = false,
-    val dateInstalled: Long = System.currentTimeMillis()
+    val dateInstalled: Long = System.currentTimeMillis(),
+    val versionCode: Long = 0,
 )
 
 @Dao
@@ -42,6 +43,9 @@ interface InstalledExtensionDao {
 
     @Query("DELETE FROM installed_extensions WHERE id = :id")
     suspend fun delete(id: String)
+
+    @Query("DELETE FROM installed_extensions")
+    suspend fun deleteAll()
 
     @Query("SELECT * FROM installed_extensions WHERE id = :id")
     suspend fun getById(id: String): InstalledExtensionEntity?

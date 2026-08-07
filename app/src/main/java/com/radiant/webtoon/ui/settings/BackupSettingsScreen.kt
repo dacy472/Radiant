@@ -78,7 +78,7 @@ fun BackupSettingsScreen(onBackClick: () -> Unit) {
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
             Text(
-                "Export your library, categories, downloads, history, and extension repos to a JSON file. " +
+                "Export your library, categories, downloads, history, extension repos, installed extension trust, and source login settings to a JSON file. " +
                     "Import restores them on this device.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant

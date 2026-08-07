@@ -60,6 +60,12 @@ interface MangaDao {
     @Query("SELECT * FROM mangas WHERE source = :sourceId AND favorite = 1")
     fun getMangaBySource(sourceId: String): Flow<List<Manga>>
 
+    @Query("SELECT * FROM mangas WHERE source = :sourceId")
+    suspend fun getAllBySource(sourceId: String): List<Manga>
+
+    @Query("DELETE FROM mangas WHERE url = :url AND source = :source")
+    suspend fun delete(url: String, source: String)
+
     @Query("UPDATE mangas SET source = :newSourceId, url = :newUrl, thumbnail_url = :newThumbnail WHERE url = :oldUrl AND source = :oldSource")
     suspend fun updateMangaMigrationData(oldUrl: String, oldSource: String, newSourceId: String, newUrl: String, newThumbnail: String)
 }

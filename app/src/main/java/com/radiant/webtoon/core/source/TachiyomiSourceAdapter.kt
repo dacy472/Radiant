@@ -18,7 +18,7 @@ import eu.kanade.tachiyomi.source.Source as TachiyomiSource
  * and our app's models (Webtoon, Chapter, List<String>).
  */
 class TachiyomiSourceAdapter(
-    private val tachiyomiSource: TachiyomiSource,
+    val tachiyomiSource: TachiyomiSource,
     override val icon: String = "emoji:📦"
 ) : Source {
 
@@ -265,12 +265,12 @@ class TachiyomiSourceAdapter(
             }
 
             val update = try {
-                tachiyomiSource.getMangaUpdate(manga, emptyList(), fetchDetails = true, fetchChapters = true)
+                lockedMangaUpdate(manga, fetchDetails = true, fetchChapters = true)
             } catch (e: Exception) {
                 // Some sources fail to fetch chapters together with details; fall back to
                 // details-only so the page still renders with an empty chapter list.
                 Log.e(tag, "Failed to get manga update for $webtoonId, falling back to details only", e)
-                val detailsOnly = tachiyomiSource.getMangaUpdate(manga, emptyList(), fetchDetails = true, fetchChapters = false)
+                val detailsOnly = lockedMangaUpdate(manga, fetchDetails = true, fetchChapters = false)
                 eu.kanade.tachiyomi.source.model.SMangaUpdate(detailsOnly.manga, emptyList())
             }
             val detailedManga = update.manga
@@ -306,13 +306,13 @@ class TachiyomiSourceAdapter(
 
     override suspend fun getMangaDetails(webtoonId: String): Webtoon = withContext(Dispatchers.IO) {
         val manga = SManga.create().apply { url = webtoonId }
-        val update = tachiyomiSource.getMangaUpdate(manga, emptyList(), fetchDetails = true, fetchChapters = false)
+        val update = lockedMangaUpdate(manga, fetchDetails = true, fetchChapters = false)
         update.manga.toWebtoon().copy(id = webtoonId)
     }
 
     override suspend fun getChapterList(webtoonId: String): List<Chapter> = withContext(Dispatchers.IO) {
         val manga = SManga.create().apply { url = webtoonId }
-        val update = tachiyomiSource.getMangaUpdate(manga, emptyList(), fetchDetails = false, fetchChapters = true)
+        val update = lockedMangaUpdate(manga, fetchDetails = false, fetchChapters = true)
         val chapterList = update.chapters
         chapterList.mapIndexed { index, sChapter ->
             Chapter(
@@ -355,6 +355,20 @@ class TachiyomiSourceAdapter(
             throw friendlyError(e, "Failed to load chapter pages")
         }
     }
+
+    private suspend fun lockedMangaUpdate(
+        manga: SManga,
+        fetchDetails: Boolean,
+        fetchChapters: Boolean,
+    ): eu.kanade.tachiyomi.source.model.SMangaUpdate =
+        MangaUpdateLocks.coalesce(
+            sourceId = tachiyomiSource.id,
+            mangaUrl = manga.url,
+            fetchDetails = fetchDetails,
+            fetchChapters = fetchChapters,
+        ) {
+            tachiyomiSource.getMangaUpdate(manga, emptyList(), fetchDetails, fetchChapters)
+        }
 
     private fun friendlyError(e: Throwable, fallback: String): Exception {
         val raw = e.message.orEmpty()

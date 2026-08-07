@@ -31,6 +31,7 @@ class SourceBrowseViewModel(
     private var source: Source? = null
     private var currentQuery: String = ""
     private var activeFilters: FilterList = FilterList()
+    private var repairAttempted = false
 
     val supportsLatest: Boolean
         get() = source?.capabilities?.supportsLatest == true
@@ -114,6 +115,18 @@ class SourceBrowseViewModel(
                 _state.value = BrowseState.Success
             } catch (e: Throwable) {
                 if (e is kotlinx.coroutines.CancellationException) throw e
+                if (!repairAttempted && isSerializationFailure(e)) {
+                    repairAttempted = true
+                    val repaired = extensionManager.repairSourceAfterSerializationFailure(sourceId)
+                    if (repaired) {
+                        source = extensionManager.getSource(sourceId)
+                        currentPage = 1
+                        _webtoons.value = emptyList()
+                        hasNextPage = true
+                        loadNextPage()
+                        return@launch
+                    }
+                }
                 // Keep previously loaded pages; only show error when the first page fails
                 if (_webtoons.value.isEmpty()) {
                     _state.value = BrowseState.Error(e.message ?: "Unknown error")
@@ -142,6 +155,16 @@ class SourceBrowseViewModel(
     }
 
     fun getSourceName(): String = source?.name ?: "Browse"
+
+    private fun isSerializationFailure(error: Throwable): Boolean {
+        var current: Throwable? = error
+        while (current != null) {
+            if (current is kotlinx.serialization.MissingFieldException) return true
+            if (current.javaClass.name.contains("MissingFieldException")) return true
+            current = current.cause
+        }
+        return false
+    }
 }
 
 sealed class BrowseState {

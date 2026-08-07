@@ -15,7 +15,6 @@ import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
@@ -23,9 +22,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.wrapContentHeight
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
@@ -75,12 +71,9 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import coil.compose.AsyncImage
-import coil.compose.SubcomposeAsyncImage
 import coil.imageLoader
-import coil.request.CachePolicy
-import coil.request.ImageRequest
 import coil.size.Precision
+import com.radiant.webtoon.ui.components.RadiantAsyncImage
 import kotlinx.coroutines.launch
 import com.radiant.webtoon.core.settings.SettingsManager
 import androidx.compose.ui.input.key.onKeyEvent
@@ -252,99 +245,22 @@ fun ReaderScreen(
             Text("No pages found", modifier = Modifier.align(Alignment.Center), color = Color.White)
         } else {
             if (readingMode == 0) {
-                // Vertical scrolling (webtoon-style) — sequential top-to-bottom via Coil
-                LazyColumn(
-                    state = listState,
-                    reverseLayout = false,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .pointerInput(Unit) {
-                            detectTapGestures(onTap = { showOverlay = !showOverlay })
-                        },
-                    contentPadding = PaddingValues(0.dp),
-                    verticalArrangement = Arrangement.spacedBy(0.dp)
-                ) {
-                    itemsIndexed(sortedPages, key = { index, _ -> index }) { index, pageUrl ->
-                        SubcomposeAsyncImage(
-                            model = ImageRequest.Builder(context)
-                                .data(pageUrl)
-                                .apply {
-                                    headersMap.forEach { (key, value) ->
-                                        addHeader(key, value)
-                                    }
-                                }
-                                .size(coil.size.Size(screenWidthPx, coil.size.Dimension.Undefined))
-                                .precision(Precision.INEXACT)
-                                .crossfade(true)
-                                .diskCachePolicy(CachePolicy.ENABLED)
-                                .memoryCachePolicy(CachePolicy.ENABLED)
-                                .build(),
-                            contentDescription = "Page ${index + 1}",
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .wrapContentHeight(),
-                            contentScale = if (cropBorders) ContentScale.FillWidth else ContentScale.Fit,
-                            loading = {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(400.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(32.dp),
-                                        color = Color.White.copy(alpha = 0.7f),
-                                        strokeWidth = 2.dp
-                                    )
-                                }
-                            },
-                            error = {
-                                Box(
-                                    modifier = Modifier
-                                        .fillMaxWidth()
-                                        .height(200.dp),
-                                    contentAlignment = Alignment.Center
-                                ) {
-                                    Text(
-                                        text = "Failed to load page ${index + 1}",
-                                        color = Color.Red.copy(alpha = 0.7f),
-                                        style = MaterialTheme.typography.bodySmall
-                                    )
-                                }
-                            }
-                        )
-                    }
-                    
-                    item {
-                        if (nextChapter != null) {
-                            val chapter = nextChapter!!
-                            Box(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .padding(vertical = 48.dp, horizontal = 24.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                OutlinedButton(
-                                    onClick = {
-                                        viewModel.loadChapter(sourceId, webtoonId, chapter.url, chapter.name)
-                                        coroutineScope.launch {
-                                            listState.scrollToItem(0)
-                                        }
-                                    },
-                                    border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.5f)),
-                                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
-                                    shape = RoundedCornerShape(12.dp)
-                                ) {
-                                    Icon(Icons.Default.NavigateNext, contentDescription = null, modifier = Modifier.size(20.dp))
-                                    Spacer(Modifier.size(8.dp))
-                                    Text("Next: ${chapter.name}")
-                                }
-                            }
-                        } else {
-                            Spacer(modifier = Modifier.height(100.dp))
+                VirtualizedWebtoonColumn(
+                    pages = sortedPages,
+                    listState = listState,
+                    headersMap = headersMap,
+                    screenWidthPx = screenWidthPx,
+                    cropBorders = cropBorders,
+                    nextChapter = nextChapter,
+                    onTap = { showOverlay = !showOverlay },
+                    onNextChapterClick = {
+                        val chapter = nextChapter ?: return@VirtualizedWebtoonColumn
+                        viewModel.loadChapter(sourceId, webtoonId, chapter.url, chapter.name)
+                        coroutineScope.launch {
+                            listState.scrollToItem(0)
                         }
-                    }
-                }
+                    },
+                )
             } else {
                 // Horizontal pager (LTR or RTL)
                 val isRtl = readingMode == 2
@@ -363,21 +279,8 @@ fun ReaderScreen(
                         var scale by remember { mutableFloatStateOf(1f) }
                         var offsetX by remember { mutableFloatStateOf(0f) }
                         var offsetY by remember { mutableFloatStateOf(0f) }
-                        AsyncImage(
-                            model = ImageRequest.Builder(context)
-                                .data(sortedPages[pageIndex])
-                                .apply {
-                                    headersMap.forEach { (key, value) ->
-                                        addHeader(key, value)
-                                    }
-                                }
-                                .size(coil.size.Size(screenWidthPx, coil.size.Dimension.Undefined))
-                                .precision(Precision.INEXACT)
-                                .crossfade(true)
-                                .allowHardware(false)
-                                .memoryCachePolicy(CachePolicy.ENABLED)
-                                .diskCachePolicy(CachePolicy.ENABLED)
-                                .build(),
+                        RadiantAsyncImage(
+                            url = sortedPages[pageIndex],
                             contentDescription = "Page ${pageIndex + 1}",
                             modifier = Modifier
                                 .fillMaxSize()
@@ -399,7 +302,11 @@ fun ReaderScreen(
                                     translationX = offsetX
                                     translationY = offsetY
                                 },
-                            contentScale = if (cropBorders) ContentScale.FillWidth else ContentScale.Fit
+                            headers = headersMap,
+                            widthPx = screenWidthPx,
+                            precision = Precision.INEXACT,
+                            allowHardware = false,
+                            contentScale = if (cropBorders) ContentScale.FillWidth else ContentScale.Fit,
                         )
                     } else {
                         if (nextChapter != null) {

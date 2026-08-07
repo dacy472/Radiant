@@ -20,7 +20,5 @@ fun DiscoverScreen(
 ) {
     ExtensionsScreen(
         extensionManager = extensionManager,
-        onSearchClick = onSearchClick,
-        onBrowseClick = onBrowseClick
     )
 }

@@ -28,6 +28,10 @@ class SettingsManager(private val context: Context) {
         val AUTO_DELETE_READ = booleanPreferencesKey("auto_delete_read")
         val DOWNLOAD_LOCATION_URI = stringPreferencesKey("download_location_uri")
         val DOWNLOAD_LOCATION_NAME = stringPreferencesKey("download_location_name")
+
+        val LOCAL_LIBRARY_URI = stringPreferencesKey("local_library_uri")
+        val LOCAL_LIBRARY_URI_NAME = stringPreferencesKey("local_library_uri_name")
+        val LOCAL_LIBRARY_PATH = stringPreferencesKey("local_library_path")
         
         val REQUIRE_BIOMETRICS = booleanPreferencesKey("require_biometrics")
         val ANILIST_TOKEN = stringPreferencesKey("anilist_token")
@@ -39,6 +43,15 @@ class SettingsManager(private val context: Context) {
         val INCOGNITO = booleanPreferencesKey("incognito")
         val FLAG_SECURE = booleanPreferencesKey("flag_secure")
         val LAST_LIBRARY_UPDATE = stringPreferencesKey("last_library_update")
+
+        val EXTENSION_ADVANCED_MODE = booleanPreferencesKey("extension_advanced_mode")
+        val EXTENSION_SOURCE_LANGS = stringSetPreferencesKey("extension_source_langs")
+        val AUTO_UPDATE_EXTENSIONS = booleanPreferencesKey("auto_update_extensions")
+
+        val READER_BRIGHTNESS = stringPreferencesKey("reader_brightness")
+        val READER_TAP_ZONES = booleanPreferencesKey("reader_tap_zones")
+        val PURE_BLACK_READER = booleanPreferencesKey("pure_black_reader")
+        val DOWNLOAD_INDEX_BACKFILLED = booleanPreferencesKey("download_index_backfilled")
 
         const val DEFAULT_REPO = "" // User will add their own repos
 
@@ -122,6 +135,13 @@ class SettingsManager(private val context: Context) {
         context.dataStore.edit { it[AUTO_DELETE_READ] = enabled }
     }
 
+    val isDownloadIndexBackfilled: Flow<Boolean> =
+        context.dataStore.data.map { it[DOWNLOAD_INDEX_BACKFILLED] ?: false }
+
+    suspend fun setDownloadIndexBackfilled(done: Boolean) {
+        context.dataStore.edit { it[DOWNLOAD_INDEX_BACKFILLED] = done }
+    }
+
     val downloadLocationUri: Flow<String?> = context.dataStore.data.map { it[DOWNLOAD_LOCATION_URI] }
     suspend fun setDownloadLocationUri(uri: String?) {
         context.dataStore.edit { 
@@ -133,6 +153,27 @@ class SettingsManager(private val context: Context) {
     suspend fun setDownloadLocationName(name: String?) {
         context.dataStore.edit { 
             if (name == null) it.remove(DOWNLOAD_LOCATION_NAME) else it[DOWNLOAD_LOCATION_NAME] = name 
+        }
+    }
+
+    val localLibraryUri: Flow<String?> = context.dataStore.data.map { it[LOCAL_LIBRARY_URI] }
+    suspend fun setLocalLibraryUri(uri: String?) {
+        context.dataStore.edit {
+            if (uri == null) it.remove(LOCAL_LIBRARY_URI) else it[LOCAL_LIBRARY_URI] = uri
+        }
+    }
+
+    val localLibraryUriName: Flow<String?> = context.dataStore.data.map { it[LOCAL_LIBRARY_URI_NAME] }
+    suspend fun setLocalLibraryUriName(name: String?) {
+        context.dataStore.edit {
+            if (name == null) it.remove(LOCAL_LIBRARY_URI_NAME) else it[LOCAL_LIBRARY_URI_NAME] = name
+        }
+    }
+
+    val localLibraryPath: Flow<String?> = context.dataStore.data.map { it[LOCAL_LIBRARY_PATH] }
+    suspend fun setLocalLibraryPath(path: String?) {
+        context.dataStore.edit {
+            if (path == null) it.remove(LOCAL_LIBRARY_PATH) else it[LOCAL_LIBRARY_PATH] = path
         }
     }
 
@@ -158,6 +199,24 @@ class SettingsManager(private val context: Context) {
                 preferences[PINNED_SOURCES] = current - sourceId
             } else {
                 preferences[PINNED_SOURCES] = current + sourceId
+            }
+        }
+    }
+
+    suspend fun ensurePinnedSource(sourceId: String) {
+        context.dataStore.edit { preferences ->
+            val current = preferences[PINNED_SOURCES] ?: emptySet()
+            if (!current.contains(sourceId)) {
+                preferences[PINNED_SOURCES] = current + sourceId
+            }
+        }
+    }
+
+    suspend fun unpinSource(sourceId: String) {
+        context.dataStore.edit { preferences ->
+            val current = preferences[PINNED_SOURCES] ?: emptySet()
+            if (current.contains(sourceId)) {
+                preferences[PINNED_SOURCES] = current - sourceId
             }
         }
     }
@@ -190,5 +249,48 @@ class SettingsManager(private val context: Context) {
     }
     suspend fun setLastLibraryUpdate(timestamp: Long) {
         context.dataStore.edit { it[LAST_LIBRARY_UPDATE] = timestamp.toString() }
+    }
+
+    // Extensions — curated default; advanced mode opens full English/all catalog
+    val extensionAdvancedMode: Flow<Boolean> = context.dataStore.data.map {
+        it[EXTENSION_ADVANCED_MODE] ?: false
+    }
+
+    suspend fun setExtensionAdvancedMode(enabled: Boolean) {
+        context.dataStore.edit { it[EXTENSION_ADVANCED_MODE] = enabled }
+    }
+
+    /** When true, background checks download and apply extension updates silently. */
+    val autoUpdateExtensions: Flow<Boolean> = context.dataStore.data.map {
+        it[AUTO_UPDATE_EXTENSIONS] ?: true
+    }
+
+    suspend fun setAutoUpdateExtensions(enabled: Boolean) {
+        context.dataStore.edit { it[AUTO_UPDATE_EXTENSIONS] = enabled }
+    }
+
+    /** Source languages to activate when advanced mode is on (default: English only). */
+    val extensionSourceLangs: Flow<Set<String>> = context.dataStore.data.map {
+        it[EXTENSION_SOURCE_LANGS] ?: setOf("en")
+    }
+
+    suspend fun setExtensionSourceLangs(langs: Set<String>) {
+        context.dataStore.edit { it[EXTENSION_SOURCE_LANGS] = langs.ifEmpty { setOf("en") } }
+    }
+
+    // Reader extras (Mihon parity)
+    val readerBrightness: Flow<String> = context.dataStore.data.map { it[READER_BRIGHTNESS] ?: "system" }
+    suspend fun setReaderBrightness(value: String) {
+        context.dataStore.edit { it[READER_BRIGHTNESS] = value }
+    }
+
+    val readerTapZones: Flow<Boolean> = context.dataStore.data.map { it[READER_TAP_ZONES] ?: true }
+    suspend fun setReaderTapZones(enabled: Boolean) {
+        context.dataStore.edit { it[READER_TAP_ZONES] = enabled }
+    }
+
+    val pureBlackReader: Flow<Boolean> = context.dataStore.data.map { it[PURE_BLACK_READER] ?: false }
+    suspend fun setPureBlackReader(enabled: Boolean) {
+        context.dataStore.edit { it[PURE_BLACK_READER] = enabled }
     }
 }

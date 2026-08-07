@@ -1,0 +1,15 @@
+{
+  "name": "Your Extension Repo",
+  "version": "1",
+  "extensions": [
+    {
+      "id": "en.your-source",
+      "name": "Your Source Name",
+      "version": "0.1.0",
+      "lang": "en",
+      "iconUrl": "https://example.com/icon.png",
+      "bundleUrl": "https://cdn.example.com/extensions/your-source/0.1.0/bundle.mjs",
+      "description": "Replace with your published bundle URL after `npm run build`"
+    }
+  ]
+}

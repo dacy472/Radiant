@@ -29,6 +29,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.radiant.webtoon.core.local.LocalSourceIds
 import com.radiant.webtoon.core.source.ExtensionManager
 import com.radiant.webtoon.core.source.Source
 import com.radiant.webtoon.ui.components.DownloadManagerIconButton
@@ -46,11 +47,13 @@ fun BrowseScreen(
     onWebViewClick: (String) -> Unit,
     onMigrateSourceClick: (String) -> Unit,
     onDownloadQueueClick: () -> Unit = {},
+    onSourceSettingsClick: (String) -> Unit = {},
 ) {
     val browseViewModel: BrowseViewModel = viewModel()
     val pagerState = rememberPagerState(pageCount = { 3 })
     val coroutineScope = rememberCoroutineScope()
-    val tabs = listOf("Sources", "Extensions", "Migrate")
+    val tabs = listOf("Sources", "Channels", "Migrate")
+    val availableUpdates by extensionManager.availableUpdates.collectAsStateWithLifecycle()
 
     var isSearching by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
@@ -64,7 +67,7 @@ fun BrowseScreen(
                             TextField(
                                 value = searchQuery,
                                 onValueChange = { searchQuery = it },
-                                placeholder = { Text("Search...") },
+                                placeholder = { Text("Search sources…") },
                                 singleLine = true,
                                 modifier = Modifier.fillMaxWidth(),
                                 colors = TextFieldDefaults.colors(
@@ -89,27 +92,24 @@ fun BrowseScreen(
                             }
                         } else {
                             when (pagerState.currentPage) {
-                                0 -> { // Sources Tab
+                                0 -> {
                                     IconButton(onClick = { isSearching = true }) {
-                                        Icon(Icons.Default.Search, contentDescription = "Local Search")
+                                        Icon(Icons.Default.Search, contentDescription = "Search sources")
                                     }
                                     IconButton(onClick = onSearchClick) {
                                         Icon(Icons.Default.Public, contentDescription = "Global Search")
                                     }
                                 }
-                                1 -> { // Extensions Tab
-                                    IconButton(onClick = { isSearching = true }) {
-                                        Icon(Icons.Default.Search, contentDescription = "Search Extensions")
-                                    }
+                                1 -> {
                                     IconButton(onClick = {
                                         coroutineScope.launch {
                                             extensionManager.refreshAvailable()
                                         }
                                     }) {
-                                        Icon(Icons.Default.Refresh, contentDescription = "Refresh")
+                                        Icon(Icons.Default.Refresh, contentDescription = "Refresh verified channels")
                                     }
                                 }
-                                2 -> { // Migrate Tab
+                                2 -> {
                                 }
                             }
                         }
@@ -125,7 +125,17 @@ fun BrowseScreen(
                                     pagerState.animateScrollToPage(index)
                                 }
                             },
-                            text = { Text(title) }
+                            text = {
+                                if (index == 1 && availableUpdates.isNotEmpty()) {
+                                    BadgedBox(
+                                        badge = { Badge() },
+                                    ) {
+                                        Text(title)
+                                    }
+                                } else {
+                                    Text(title)
+                                }
+                            },
                         )
                     }
                 }
@@ -140,7 +150,7 @@ fun BrowseScreen(
         ) { page ->
             when (page) {
                 0 -> SourcesTab(extensionManager, searchQuery, onBrowseClick, onWebViewClick)
-                1 -> ExtensionsTab(extensionManager, searchQuery)
+                1 -> ExtensionsTab(extensionManager, onSourceSettingsClick)
                 2 -> MigrateTab(browseViewModel, onMigrateSourceClick)
             }
         }
@@ -151,19 +161,21 @@ fun BrowseScreen(
 fun SourcesTab(extensionManager: ExtensionManager, searchQuery: String, onBrowseClick: (String) -> Unit, onWebViewClick: (String) -> Unit) {
     val sources by extensionManager.installedExtensions.collectAsStateWithLifecycle()
     val coroutineScope = rememberCoroutineScope()
-    
-    val filteredSources = sources.filter { it.name.contains(searchQuery, ignoreCase = true) }
+
+    val filteredSources = sources
+        .filter { it.id != LocalSourceIds.LOCAL_SOURCE_ID }
+        .filter { it.name.contains(searchQuery, ignoreCase = true) }
 
     val pinnedSources = filteredSources.filter { it.isPinned }
     val otherSources = filteredSources.filter { !it.isPinned }
 
-    if (sources.isEmpty()) {
+    if (sources.none { it.id != LocalSourceIds.LOCAL_SOURCE_ID }) {
         Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Text("No sources installed.", style = MaterialTheme.typography.bodyLarge)
                 Spacer(modifier = Modifier.height(8.dp))
                 Text(
-                    "Open Extensions and install curated English sources.",
+                    "Open Channels and install verified official sources.",
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -188,7 +200,7 @@ fun SourcesTab(extensionManager: ExtensionManager, searchQuery: String, onBrowse
             items(pinnedSources, key = { it.id }) { source ->
                 SourceListItem(
                     source = source,
-                    isPinned = true,
+                    isPinned = source.isPinned,
                     onPinClick = {
                         coroutineScope.launch { extensionManager.togglePin(source.id) }
                     },
@@ -213,7 +225,7 @@ fun SourcesTab(extensionManager: ExtensionManager, searchQuery: String, onBrowse
             items(otherSources, key = { it.id }) { source ->
                 SourceListItem(
                     source = source,
-                    isPinned = false,
+                    isPinned = source.isPinned,
                     onPinClick = {
                         coroutineScope.launch { extensionManager.togglePin(source.id) }
                     },
@@ -302,13 +314,13 @@ fun SourceListItem(
 }
 
 @Composable
-fun ExtensionsTab(extensionManager: ExtensionManager, searchQuery: String) {
-    // We integrate ExtensionsScreen natively.
+fun ExtensionsTab(
+    extensionManager: ExtensionManager,
+    onSourceSettingsClick: (String) -> Unit = {},
+) {
     ExtensionsScreen(
         extensionManager = extensionManager,
-        searchQuery = searchQuery,
-        onSearchClick = {},
-        onBrowseClick = {}
+        onSourceSettingsClick = onSourceSettingsClick,
     )
 }
 

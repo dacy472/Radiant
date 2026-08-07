@@ -60,6 +60,7 @@ import androidx.core.content.ContextCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 
 
 sealed class Screen(val route: String, val title: String, val icon: ImageVector) {
@@ -130,6 +131,7 @@ fun WebtoonApp() {
     val app = remember { context.applicationContext as WebtoonApplication }
     val repository = remember { app.repository }
     val extensionManager = remember { app.extensionManager }
+    val availableExtensionUpdates by extensionManager.availableUpdates.collectAsStateWithLifecycle()
 
     val navController = rememberNavController()
 
@@ -162,7 +164,25 @@ fun WebtoonApp() {
                     ) {
                         items.forEach { screen ->
                             NavigationBarItem(
-                                icon = { Icon(screen.icon, contentDescription = screen.title) },
+                                icon = {
+                                    val showUpdateBadge = screen == Screen.Settings && availableExtensionUpdates.isNotEmpty()
+                                    if (showUpdateBadge) {
+                                        BadgedBox(
+                                            badge = {
+                                                Badge {
+                                                    Text(
+                                                        text = availableExtensionUpdates.size.toString(),
+                                                        style = MaterialTheme.typography.labelSmall,
+                                                    )
+                                                }
+                                            },
+                                        ) {
+                                            Icon(screen.icon, contentDescription = screen.title)
+                                        }
+                                    } else {
+                                        Icon(screen.icon, contentDescription = screen.title)
+                                    }
+                                },
                                 label = { Text(screen.title, style = MaterialTheme.typography.labelSmall) },
                                 selected = currentDestination?.route == screen.route,
                                 colors = NavigationBarItemDefaults.colors(
@@ -238,6 +258,9 @@ fun WebtoonApp() {
                         navController.navigate("migrate_list/${encodeNav(sourceId)}")
                     },
                     onDownloadQueueClick = { navController.navigate("downloads_queue") },
+                    onSourceSettingsClick = { sourceId ->
+                        navController.navigate("source_settings/${encodeNav(sourceId)}")
+                    },
                 )
             }
 
@@ -356,7 +379,8 @@ fun WebtoonApp() {
                     onSecurityClick = { navController.navigate("settings/security") },
                     onAboutClick = { navController.navigate("settings/about") },
                     onAdvancedClick = { navController.navigate("settings/advanced") },
-                    onStatsClick = { navController.navigate("settings/stats") }
+                    onStatsClick = { navController.navigate("settings/stats") },
+                    onUpcomingClick = { navController.navigate("upcoming") },
                 )
             }
             
@@ -401,6 +425,28 @@ fun WebtoonApp() {
             composable("settings/advanced") {
                 com.radiant.webtoon.ui.settings.AdvancedSettingsScreen(
                     onBackClick = { navController.popBackStack() }
+                )
+            }
+
+            composable(
+                route = "source_settings/{sourceId}",
+                arguments = listOf(navArgument("sourceId") { type = NavType.StringType }),
+            ) { backStackEntry ->
+                val sourceId = decodeNav(backStackEntry.arguments?.getString("sourceId") ?: "")
+                com.radiant.webtoon.ui.extensions.SourceSettingsScreen(
+                    sourceId = sourceId,
+                    extensionManager = extensionManager,
+                    onBackClick = { navController.popBackStack() },
+                )
+            }
+
+            composable("upcoming") {
+                com.radiant.webtoon.ui.upcoming.UpcomingScreen(
+                    repository = repository,
+                    onBackClick = { navController.popBackStack() },
+                    onWebtoonClick = { sourceId, webtoonId ->
+                        navController.navigate("detail/${encodeNav(sourceId)}/${encodeNav(webtoonId)}")
+                    },
                 )
             }
 

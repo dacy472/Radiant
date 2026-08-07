@@ -1,5 +1,6 @@
 package com.radiant.webtoon.core.model
 
+import com.radiant.webtoon.core.source.ExtensionLibCompatibility
 import com.radiant.webtoon.core.source.Source
 
 /**
@@ -14,6 +15,7 @@ sealed class Extension {
     abstract val nsfw: Boolean
     abstract val isTrusted: Boolean
     abstract val isInstalled: Boolean
+    abstract val libCompatibility: ExtensionLibCompatibility
 
     /**
      * An extension that is physically installed on the device (usually an APK).
@@ -30,7 +32,9 @@ sealed class Extension {
         val versionCode: Int = 0,
         val sources: List<Source> = emptyList(),
         val hasUpdate: Boolean = false,
-        val downloadUrl: String? = null
+        val downloadUrl: String? = null,
+        val extensionLibVersion: String? = null,
+        override val libCompatibility: ExtensionLibCompatibility = ExtensionLibCompatibility.Compatible,
     ) : Extension() {
         override val isInstalled: Boolean = true
     }
@@ -51,6 +55,8 @@ sealed class Extension {
         val downloadUrl: String? = null,
         override val isInstalled: Boolean = false,
         /** False for non-English catalog entries — shown but not installable. */
-        val isLanguageEnabled: Boolean = true
+        val isLanguageEnabled: Boolean = true,
+        val extensionLibVersion: String? = null,
+        override val libCompatibility: ExtensionLibCompatibility = ExtensionLibCompatibility.Compatible,
     ) : Extension()
 }

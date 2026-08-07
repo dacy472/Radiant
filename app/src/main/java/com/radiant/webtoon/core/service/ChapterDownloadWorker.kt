@@ -177,6 +177,19 @@ class ChapterDownloadWorker(
                     localPath = cbzFile.absolutePath
                 )
             )
+            app.database.downloadedChapterDao().insert(
+                com.radiant.webtoon.core.database.DownloadedChapter(
+                    sourceId = sourceId,
+                    chapterId = chapterId,
+                    webtoonId = webtoonId,
+                    webtoonTitle = webtoonTitle,
+                    chapterTitle = chapterTitle,
+                    sourceName = source.name,
+                    localDirectory = cbzFile.absolutePath,
+                    pageCount = archivedPages,
+                    fileSizeBytes = cbzFile.length(),
+                ),
+            )
             showCompletionNotification(webtoonTitle, chapterTitle)
             Log.i(TAG, "Download complete → ${cbzFile.absolutePath} ($archivedPages/$total pages)")
             Result.success()

@@ -1,0 +1,23 @@
+{
+  "name": "Radiant JS Extensions",
+  "version": "1",
+  "extensions": [
+    {
+      "id": "en.picsum",
+      "name": "Picsum Demo",
+      "version": "1.0.0",
+      "lang": "en",
+      "iconUrl": "https://picsum.photos/seed/radiant/128",
+      "bundleUrl": "http://localhost:3001/fixtures/bundles/picsum.mjs",
+      "description": "Placeholder images for reader testing"
+    },
+    {
+      "id": "en.mock",
+      "name": "Mock Catalog",
+      "version": "1.0.0",
+      "lang": "en",
+      "iconUrl": "https://picsum.photos/seed/mock/128",
+      "bundleUrl": "http://localhost:3001/fixtures/bundles/mock.mjs"
+    }
+  ]
+}

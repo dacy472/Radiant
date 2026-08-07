@@ -1,9 +1,11 @@
 package eu.kanade.tachiyomi
 
+import com.radiant.webtoon.BuildConfig
+
 /**
- * Stub to satisfy extensions that depend on Tachiyomi's AppInfo.
+ * Host app version info exposed to extensions (matches Mihon/TachiyomiX contract).
  */
 object AppInfo {
-    fun getVersionCode(): Int = 1
-    fun getVersionName(): String = "1.0"
+    fun getVersionCode(): Int = BuildConfig.VERSION_CODE
+    fun getVersionName(): String = BuildConfig.VERSION_NAME
 }

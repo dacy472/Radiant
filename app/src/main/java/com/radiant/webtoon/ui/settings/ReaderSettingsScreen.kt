@@ -22,6 +22,11 @@ fun ReaderSettingsScreen(onBackClick: () -> Unit) {
     val keepScreenOn by settingsManager.keepScreenOn.collectAsState(initial = true)
     val volumeKeysNav by settingsManager.volumeKeysNav.collectAsState(initial = false)
 
+    val cropBorders by settingsManager.cropBorders.collectAsState(initial = false)
+    val readerTapZones by settingsManager.readerTapZones.collectAsState(initial = true)
+    val pureBlackReader by settingsManager.pureBlackReader.collectAsState(initial = false)
+    val readerBrightness by settingsManager.readerBrightness.collectAsState(initial = "system")
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -84,6 +89,72 @@ fun ReaderSettingsScreen(onBackClick: () -> Unit) {
                     checked = volumeKeysNav,
                     onCheckedChange = { scope.launch { settingsManager.setVolumeKeysNav(it) } }
                 )
+            }
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+            ) {
+                Column {
+                    Text("Crop borders", style = MaterialTheme.typography.titleMedium)
+                    Text("Trim white margins around pages", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(
+                    checked = cropBorders,
+                    onCheckedChange = { scope.launch { settingsManager.setCropBorders(it) } },
+                )
+            }
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+            ) {
+                Column {
+                    Text("Tap zones", style = MaterialTheme.typography.titleMedium)
+                    Text("Tap left/right edges to turn pages", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(
+                    checked = readerTapZones,
+                    onCheckedChange = { scope.launch { settingsManager.setReaderTapZones(it) } },
+                )
+            }
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+            ) {
+                Column {
+                    Text("Pure black reader background", style = MaterialTheme.typography.titleMedium)
+                    Text("OLED-friendly black behind pages", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                }
+                Switch(
+                    checked = pureBlackReader,
+                    onCheckedChange = { scope.launch { settingsManager.setPureBlackReader(it) } },
+                )
+            }
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
+
+            Text("Reader brightness", style = MaterialTheme.typography.titleMedium)
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(modifier = Modifier.fillMaxWidth()) {
+                listOf("system" to "System", "dim" to "Dim", "bright" to "Bright").forEach { (value, label) ->
+                    FilterChip(
+                        selected = readerBrightness == value,
+                        onClick = { scope.launch { settingsManager.setReaderBrightness(value) } },
+                        label = { Text(label, style = MaterialTheme.typography.labelSmall) },
+                        modifier = Modifier.padding(end = 8.dp),
+                    )
+                }
             }
         }
     }

@@ -28,6 +28,10 @@ fun AdvancedSettingsScreen(onBackClick: () -> Unit) {
     var tapCount by remember { mutableIntStateOf(0) }
     var isDeveloperMode by remember { mutableStateOf(false) }
 
+    val extensionAdvancedMode by settingsManager.extensionAdvancedMode.collectAsState(initial = false)
+    val autoUpdateExtensions by settingsManager.autoUpdateExtensions.collectAsState(initial = true)
+    var showAdvancedWarning by remember { mutableStateOf(false) }
+
     Scaffold(
         topBar = {
             TopAppBar(
@@ -85,6 +89,56 @@ fun AdvancedSettingsScreen(onBackClick: () -> Unit) {
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
 
+            Text("Extensions", style = MaterialTheme.typography.titleMedium)
+            Spacer(modifier = Modifier.height(8.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Install any extension", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "Opens the full English/all-lang Keiyoushi catalog. Uses more memory; some sources are untested.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = extensionAdvancedMode,
+                    onCheckedChange = { enabled ->
+                        if (enabled) {
+                            showAdvancedWarning = true
+                        } else {
+                            scope.launch { settingsManager.setExtensionAdvancedMode(false) }
+                        }
+                    },
+                )
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Auto-Update Extensions", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "When on, verified channel updates download and apply in the background. " +
+                            "When off, you'll see an update badge and can install manually.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = autoUpdateExtensions,
+                    onCheckedChange = {
+                        scope.launch { settingsManager.setAutoUpdateExtensions(it) }
+                    },
+                )
+            }
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
+
             // Troubleshooting
             Text("Troubleshooting", style = MaterialTheme.typography.titleMedium)
             var cacheCleared by remember { mutableStateOf(false) }
@@ -117,6 +171,75 @@ fun AdvancedSettingsScreen(onBackClick: () -> Unit) {
                 ) {
                     Text(if (extCacheCleared) "Extension Cache Cleared ✓" else "Clear Extension Cache", color = MaterialTheme.colorScheme.onErrorContainer)
                 }
+
+                Spacer(modifier = Modifier.height(8.dp))
+                val app = context.applicationContext as com.radiant.webtoon.WebtoonApplication
+                var showResetConfirm by remember { mutableStateOf(false) }
+                var resetInProgress by remember { mutableStateOf(false) }
+                var resetMessage by remember { mutableStateOf<String?>(null) }
+
+                Button(
+                    onClick = { showResetConfirm = true },
+                    enabled = !resetInProgress,
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(
+                        if (resetInProgress) "Resetting Extensions…" else "Reset Extensions",
+                        color = MaterialTheme.colorScheme.onError,
+                    )
+                }
+
+                resetMessage?.let { message ->
+                    Text(
+                        text = message,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 8.dp),
+                    )
+                }
+
+                if (showResetConfirm) {
+                    AlertDialog(
+                        onDismissRequest = { if (!resetInProgress) showResetConfirm = false },
+                        title = { Text("Reset all extensions?") },
+                        text = {
+                            Text(
+                                "This deletes every locally downloaded extension APK, clears the " +
+                                    "extension database, and reinstalls curated defaults (including " +
+                                    "Flame Comics) from the Keiyoushi repository.",
+                            )
+                        },
+                        confirmButton = {
+                            TextButton(
+                                onClick = {
+                                    resetInProgress = true
+                                    resetMessage = null
+                                    scope.launch {
+                                        try {
+                                            val result = app.extensionManager.forceResetExtensions()
+                                            resetMessage =
+                                                "Reset complete. Removed ${result.deletedApkCount} APK(s); " +
+                                                    "${result.reinstalledCount} extension(s) reinstalled from repo."
+                                        } catch (e: Exception) {
+                                            resetMessage = "Reset failed: ${e.localizedMessage ?: e.message}"
+                                        } finally {
+                                            resetInProgress = false
+                                            showResetConfirm = false
+                                        }
+                                    }
+                                },
+                                enabled = !resetInProgress,
+                            ) { Text("Reset") }
+                        },
+                        dismissButton = {
+                            TextButton(
+                                onClick = { showResetConfirm = false },
+                                enabled = !resetInProgress,
+                            ) { Text("Cancel") }
+                        },
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.weight(1f))
@@ -136,5 +259,29 @@ fun AdvancedSettingsScreen(onBackClick: () -> Unit) {
                 textAlign = TextAlign.Center
             )
         }
+    }
+
+    if (showAdvancedWarning) {
+        AlertDialog(
+            onDismissRequest = { showAdvancedWarning = false },
+            title = { Text("Enable advanced extensions?") },
+            text = {
+                Text(
+                    "You can install extensions outside Radiant's curated list. " +
+                        "This may increase memory use and expose NSFW sources if filtering is disabled.",
+                )
+            },
+            confirmButton = {
+                TextButton(
+                    onClick = {
+                        scope.launch { settingsManager.setExtensionAdvancedMode(true) }
+                        showAdvancedWarning = false
+                    },
+                ) { Text("Enable") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showAdvancedWarning = false }) { Text("Cancel") }
+            },
+        )
     }
 }

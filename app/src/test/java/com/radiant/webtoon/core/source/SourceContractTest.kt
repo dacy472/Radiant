@@ -8,7 +8,8 @@ class SourceContractTest {
     @Test
     fun `default capabilities are conservative`() {
         val caps = SourceCapabilities()
-        assertTrue(caps.supportsSearch)
+        assertFalse(caps.supportsSearch)
+        assertFalse(caps.supportsLatest)
         assertFalse(caps.supportsNsfw)
         assertFalse(caps.supportsFilters)
     }

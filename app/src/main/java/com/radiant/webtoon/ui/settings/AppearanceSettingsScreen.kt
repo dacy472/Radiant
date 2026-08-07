@@ -38,7 +38,12 @@ fun AppearanceSettingsScreen(onBackClick: () -> Unit) {
             Text("Theme Mode", style = MaterialTheme.typography.titleMedium)
             Spacer(modifier = Modifier.height(8.dp))
             Row(modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
-                val themes = listOf("system" to "System", "light" to "Light", "dark" to "Dark")
+                val themes = listOf(
+                    "system" to "System",
+                    "light" to "Light",
+                    "dark" to "Dark",
+                    "amoled" to "AMOLED",
+                )
                 themes.forEach { (value, label) ->
                     FilterChip(
                         selected = themeMode == value,

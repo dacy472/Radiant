@@ -86,17 +86,16 @@ class LibraryViewModel(private val repository: WebtoonRepository) : ViewModel() 
     init {
         viewModelScope.launch { refreshCategories() }
         viewModelScope.launch {
-            repository.mangaDao.getFavoritesFlow().collect { favorites ->
-                enrich(favorites)
-            }
+            combine(
+                repository.mangaDao.getFavoritesFlow(),
+                repository.downloadedChaptersFlow(),
+            ) { favorites, _ -> favorites }
+                .collect { enrich(it) }
         }
     }
 
     private suspend fun enrich(favorites: List<Manga>) {
-        val downloads = repository.getDownloads()
-            .filter { it.status == com.radiant.webtoon.core.database.DownloadStatus.COMPLETED }
-            .map { "${it.sourceId}|${it.webtoonId}" }
-            .toSet()
+        val downloads = repository.getDownloadedWebtoonKeys()
         val history = runCatching { repository.getHistory() }.getOrDefault(emptyList())
         val historyKeys = history.map { "${it.source_id}|${it.webtoon_id}" }.toSet()
 

@@ -20,9 +20,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import coil.compose.SubcomposeAsyncImage
-import coil.compose.SubcomposeAsyncImageContent
-import coil.request.ImageRequest
 import coil.size.Precision
 import coil.size.Scale
 import com.radiant.webtoon.core.model.Webtoon
@@ -96,7 +93,6 @@ fun WebtoonThumbnailCard(
     sourceId: String? = null,
     unreadCount: Int = 0,
 ) {
-    val context = LocalContext.current
     val headers = rememberSourceImageHeaders(sourceId)
     Column(
         modifier = Modifier
@@ -116,20 +112,17 @@ fun WebtoonThumbnailCard(
                 .fillMaxWidth()
                 .clip(RoundedCornerShape(8.dp)),
         ) {
-            SubcomposeAsyncImage(
-                model = ImageRequest.Builder(context)
-                    .data(webtoon.thumbnail)
-                    .apply { headers.forEach { (key, value) -> addHeader(key, value) } }
-                    .size(360, 540)
-                    .precision(Precision.INEXACT)
-                    .scale(Scale.FILL)
-                    .crossfade(true)
-                    .build(),
+            RadiantAsyncImage(
+                url = webtoon.thumbnail,
                 contentDescription = webtoon.title,
                 modifier = Modifier.fillMaxSize(),
+                headers = headers,
+                widthDp = 360,
+                heightDp = 540,
+                precision = Precision.INEXACT,
+                scale = Scale.FILL,
                 contentScale = ContentScale.Crop,
                 error = { CoverErrorPlaceholder(Modifier.fillMaxSize()) },
-                success = { SubcomposeAsyncImageContent() },
             )
             UnreadCountBadge(
                 count = unreadCount,

@@ -7,6 +7,8 @@ import com.radiant.webtoon.core.repository.WebtoonRepository
 import com.radiant.webtoon.core.settings.SettingsManager
 import com.radiant.webtoon.core.source.ExtensionLoader
 import com.radiant.webtoon.core.source.ExtensionManager
+import com.radiant.webtoon.core.service.ExtensionColdStartUpdate
+import com.radiant.webtoon.core.service.ExtensionUpdateWorker
 import com.radiant.webtoon.core.service.LibraryUpdateWorker
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -15,18 +17,13 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import coil.ImageLoader
 import coil.ImageLoaderFactory
-import coil.disk.DiskCache
-import coil.memory.MemoryCache
-import uy.kohesive.injekt.*
-import uy.kohesive.injekt.api.*
+import com.radiant.webtoon.core.image.RadiantImageLoader
+import com.radiant.webtoon.core.di.ExtensionCompatModule
 import eu.kanade.tachiyomi.network.NetworkHelper
-import eu.kanade.tachiyomi.core.preference.PreferenceStore
-import eu.kanade.tachiyomi.core.preference.AndroidPreferenceStore
 import kotlinx.serialization.ExperimentalSerializationApi
-import kotlinx.serialization.json.Json
-import kotlinx.serialization.protobuf.ProtoBuf
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import uy.kohesive.injekt.injectLazy
 import eu.kanade.tachiyomi.network.interceptor.rateLimit
 import eu.kanade.tachiyomi.network.GET
 
@@ -47,28 +44,15 @@ class WebtoonApplication : Application(), ImageLoaderFactory {
             )
             .build()
 
-        return ImageLoader.Builder(this)
-            .okHttpClient(imageClient)
-            .components {
+        return RadiantImageLoader.build(this, imageClient) {
+            components {
                 // Many source sites (e.g. Mangabat, Asura Scans) hotlink-protect their cover
                 // images and require the site's own Referer/User-Agent headers, which the
                 // extension exposes via Source.getWebViewHeaders(). Without this, covers on
                 // browse/search/library grids can silently fail to load.
                 add(SourceHeaderInterceptor(extensionManager))
             }
-            .memoryCache {
-                MemoryCache.Builder(this)
-                    .maxSizePercent(0.20) // Keep webtoon pages without eating half the heap
-                    .build()
-            }
-            .diskCache {
-                DiskCache.Builder()
-                    .directory(cacheDir.resolve("image_cache"))
-                    .maxSizeBytes(512L * 1024 * 1024) // 512 MB disk cache
-                    .build()
-            }
-            .crossfade(true)
-            .build()
+        }
     }
 
     val database by lazy { WebtoonDatabase.getDatabase(this) }
@@ -92,20 +76,38 @@ class WebtoonApplication : Application(), ImageLoaderFactory {
             database.chapterDao(),
             database.historyDao(),
             database.downloadDao(),
+            database.downloadedChapterDao(),
             database
         )
     }
 
-    val downloadQueueManager by lazy {
-        com.radiant.webtoon.core.service.DownloadQueueManager(
+    val downloadManager by lazy {
+        com.radiant.webtoon.core.download.DownloadManager(
             this,
             repository,
-            settingsManager
+            settingsManager,
+            applicationScope,
         )
     }
 
+    /** @deprecated Use [downloadManager] */
+    val downloadQueueManager get() = downloadManager
+
     val backupService by lazy {
         com.radiant.webtoon.core.backup.BackupService(this, database)
+    }
+
+    val localLibraryCatalog by lazy { com.radiant.webtoon.core.local.LocalLibraryCatalog() }
+
+    val localSource by lazy { com.radiant.webtoon.core.local.LocalSource(localLibraryCatalog) }
+
+    val localLibraryManager by lazy {
+        com.radiant.webtoon.core.local.LocalLibraryManager(
+            context = this,
+            settingsManager = settingsManager,
+            database = database,
+            catalog = localLibraryCatalog,
+        )
     }
 
     val trackerService by lazy {
@@ -115,24 +117,25 @@ class WebtoonApplication : Application(), ImageLoaderFactory {
     @OptIn(ExperimentalSerializationApi::class)
     override fun onCreate() {
         super.onCreate()
-        
-        // Initialize service locator for Tachiyomi extensions
-        Injekt.addSingleton<Application>(this)
-        Injekt.addSingleton<Context>(this)
-        Injekt.addSingleton(NetworkHelper(this))
-        Injekt.addSingleton<PreferenceStore>(AndroidPreferenceStore(this))
-        Injekt.addSingleton(database.mangaDao())
-        Injekt.addSingleton(database.chapterDao())
-        Injekt.addSingleton(database.historyDao())
-        Injekt.addSingleton(Json { ignoreUnknownKeys = true; isLenient = true })
-        // Keiyoushi utils resolve ProtoBuf via Injekt.get() (e.g. Asura Scans parseAsProto)
-        Injekt.addSingleton<ProtoBuf>(ProtoBuf)
 
-        // Library updates are manual-only (Updates tab). Cancel any periodic work left over
-        // from older builds that scheduled daily/6h/12h background checks.
+        // Full Injekt graph for Tachiyomi/Mihon extensions — must run before any DEX load
+        ExtensionCompatModule.install(this)
+
         LibraryUpdateWorker.cancel(this@WebtoonApplication)
+        ExtensionUpdateWorker.schedule(this@WebtoonApplication)
+        ExtensionColdStartUpdate.schedule(this@WebtoonApplication, applicationScope)
         applicationScope.launch {
             settingsManager.migrateAutoUpdateToManual()
+            settingsManager.unpinSource(com.radiant.webtoon.core.local.LocalSourceIds.LOCAL_SOURCE_ID)
+            com.radiant.webtoon.core.download.DownloadIndexBackfill.runIfNeeded(
+                context = this@WebtoonApplication,
+                downloadedChapterDao = database.downloadedChapterDao(),
+                downloadDao = database.downloadDao(),
+                mangaDao = database.mangaDao(),
+                chapterDao = database.chapterDao(),
+                settingsManager = settingsManager,
+            )
+            localLibraryManager.refresh()
         }
     }
 

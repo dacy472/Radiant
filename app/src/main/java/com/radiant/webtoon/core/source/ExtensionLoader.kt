@@ -15,7 +15,10 @@ import eu.kanade.tachiyomi.source.Source as TachiyomiSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Request
+import kotlinx.serialization.decodeFromByteArray
+import kotlinx.serialization.protobuf.ProtoBuf
 import java.io.File
+import java.util.zip.GZIPInputStream
 
 /**
  * Handles:
@@ -77,49 +80,101 @@ class ExtensionLoader(private val context: Context) {
         "mihon.extension."
     )
 
+    private val protoBuf = ProtoBuf
+
     // ─── Repo Index Fetching ───
 
     suspend fun fetchRepoIndex(repoUrl: String): RepoIndex = withContext(Dispatchers.IO) {
         var url = repoUrl.trim()
-        if (!url.endsWith(".json")) {
-            url = "${url.trimEnd('/')}/index.min.json"
+        if (!url.endsWith(".json") && !url.endsWith(".pb")) {
+            url = "${url.trimEnd('/')}/index.pb"
         }
 
         Log.d(tag, "Fetching repo index from: $url")
         val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        var request = Request.Builder()
-            .url(url)
-            .header("User-Agent", userAgent)
-            .build()
-        var response = client.newCall(request).execute()
 
-        // Fallback to index.json if index.min.json fails
-        if (!response.isSuccessful && url.endsWith("index.min.json")) {
-            response.close()
-            url = url.replace("index.min.json", "index.json")
-            Log.d(tag, "Fallback fetching repo index from: $url")
-            request = Request.Builder()
-                .url(url)
+        fun fetchBytes(targetUrl: String): ByteArray {
+            val request = Request.Builder()
+                .url(targetUrl)
                 .header("User-Agent", userAgent)
                 .build()
-            response = client.newCall(request).execute()
+            client.newCall(request).execute().use { response ->
+                if (!response.isSuccessful) {
+                    throw Exception("Failed to fetch repo index: HTTP ${response.code}")
+                }
+                return response.body?.bytes() ?: throw Exception("Empty response body")
+            }
         }
 
-        response.use { resp ->
-            if (!resp.isSuccessful) {
-                throw Exception("Failed to fetch repo index: HTTP ${resp.code}")
+        var bytes = fetchBytes(url)
+
+        // Legacy JSON fallback when .pb URL returns JSON (deprecated stub index)
+        if (bytes.isNotEmpty() && (bytes[0] == '['.code.toByte() || bytes[0] == '{'.code.toByte())) {
+            if (url.endsWith("index.min.json")) {
+                val jsonUrl = url.replace("/index.min.json", "/index.json")
+                if (jsonUrl != url) {
+                    try {
+                        bytes = fetchBytes(jsonUrl)
+                    } catch (_: Exception) {
+                        // use original bytes
+                    }
+                }
             }
+            return@withContext filterRepoIndex(parseLegacyJsonIndex(String(bytes), url))
+        }
 
-            val body = resp.body?.string() ?: throw Exception("Empty response body")
-            val trimmedBody = body.trimStart()
+        // Gzip-compressed protobuf (Keiyoushi index.pb)
+        if (bytes.size >= 2 && bytes[0] == 0x1f.toByte() && bytes[1] == 0x8b.toByte()) {
+            bytes = GZIPInputStream(bytes.inputStream()).use { it.readBytes() }
+        }
 
-            if (trimmedBody.startsWith("[")) {
-                // Direct array of extensions
-                val listType = object : com.google.gson.reflect.TypeToken<List<RepoExtensionEntry>>() {}.type
-                val extensions: List<RepoExtensionEntry> = gson.fromJson(trimmedBody, listType)
-                RepoIndex(name = "Imported Repository", description = "", extensions = extensions)
-            } else {
-                gson.fromJson(trimmedBody, RepoIndex::class.java)
+        val store = protoBuf.decodeFromByteArray<NetworkExtensionStore>(bytes)
+        if (store.extensionListUrl != null) {
+            Log.d(tag, "Repo uses external extension list: ${store.extensionListUrl}")
+            val listBytes = fetchBytes(store.extensionListUrl!!).let { raw ->
+                if (raw.size >= 2 && raw[0] == 0x1f.toByte() && raw[1] == 0x8b.toByte()) {
+                    GZIPInputStream(raw.inputStream()).use { it.readBytes() }
+                } else {
+                    raw
+                }
+            }
+            val list = protoBuf.decodeFromByteArray<NetworkExtensionStore.ExtensionList>(listBytes)
+            val entries = list.extensions.flatMap { ext ->
+                NetworkExtensionStore(
+                    extensionList = NetworkExtensionStore.ExtensionList(extensions = listOf(ext)),
+                ).toRepoEntries(url)
+            }
+            return@withContext filterRepoIndex(
+                RepoIndex(
+                    name = store.name.ifBlank { "Repository" },
+                    description = store.badgeLabel,
+                    extensions = entries,
+                ),
+            )
+        }
+
+        val entries = store.toRepoEntries(url)
+        filterRepoIndex(
+            RepoIndex(
+                name = store.name.ifBlank { "Repository" },
+                description = store.badgeLabel,
+                extensions = entries,
+            ),
+        )
+    }
+
+    private fun filterRepoIndex(index: RepoIndex): RepoIndex =
+        index.copy(extensions = index.extensions.filter { ExtensionAllowlist.isAllowedRepoEntry(it) })
+
+    private fun parseLegacyJsonIndex(body: String, repoUrl: String): RepoIndex {
+        val trimmedBody = body.trimStart()
+        return if (trimmedBody.startsWith("[")) {
+            val listType = object : com.google.gson.reflect.TypeToken<List<RepoExtensionEntry>>() {}.type
+            val extensions: List<RepoExtensionEntry> = gson.fromJson(trimmedBody, listType)
+            RepoIndex(name = "Legacy Repository", description = "", extensions = extensions.onEach { it.repoUrl = repoUrl })
+        } else {
+            gson.fromJson(trimmedBody, RepoIndex::class.java).also { index ->
+                index.extensions.forEach { it.repoUrl = repoUrl }
             }
         }
     }
@@ -134,13 +189,15 @@ class ExtensionLoader(private val context: Context) {
         repoUrl: String,
         entry: RepoExtensionEntry
     ): File = withContext(Dispatchers.IO) {
-        val baseRepoUrl = if (repoUrl.trim().endsWith(".json"))
-            repoUrl.trim().substringBeforeLast("/")
-        else
-            repoUrl.trimEnd('/')
-
-        val fileName = entry.fileName
-        val downloadUrl = "$baseRepoUrl/apk/$fileName"
+        val downloadUrl = entry.apkUrl?.takeIf { it.isNotBlank() }
+            ?: run {
+                val baseRepoUrl = if (repoUrl.trim().endsWith(".json") || repoUrl.trim().endsWith(".pb")) {
+                    repoUrl.trim().substringBeforeLast("/")
+                } else {
+                    repoUrl.trimEnd('/')
+                }
+                "$baseRepoUrl/apk/${entry.fileName}"
+            }
         Log.d(tag, "Downloading extension APK: ${entry.name} from $downloadUrl")
 
         val request = Request.Builder().url(downloadUrl).build()
@@ -149,7 +206,7 @@ class ExtensionLoader(private val context: Context) {
                 throw Exception("Failed to download extension: HTTP ${response.code}")
             }
 
-            val localFile = File(apkDownloadDir, fileName)
+            val localFile = File(apkDownloadDir, entry.fileName)
             response.body?.let { body ->
                 localFile.outputStream().use { out ->
                     body.byteStream().use { input ->
@@ -168,12 +225,15 @@ class ExtensionLoader(private val context: Context) {
      * Use this for extensions that should be installed into the system.
      */
     fun downloadExtensionViaManager(repoUrl: String, entry: RepoExtensionEntry) {
-        val baseRepoUrl = if (repoUrl.trim().endsWith(".json"))
-            repoUrl.trim().substringBeforeLast("/")
-        else
-            repoUrl.trimEnd('/')
-
-        val downloadUrl = "$baseRepoUrl/apk/${entry.fileName}"
+        val downloadUrl = entry.apkUrl?.takeIf { it.isNotBlank() }
+            ?: run {
+                val baseRepoUrl = if (repoUrl.trim().endsWith(".json") || repoUrl.trim().endsWith(".pb")) {
+                    repoUrl.trim().substringBeforeLast("/")
+                } else {
+                    repoUrl.trimEnd('/')
+                }
+                "$baseRepoUrl/apk/${entry.fileName}"
+            }
         
         val downloadManager = context.getSystemService(android.content.Context.DOWNLOAD_SERVICE) as android.app.DownloadManager
         val request = android.app.DownloadManager.Request(android.net.Uri.parse(downloadUrl)).apply {
@@ -278,9 +338,11 @@ class ExtensionLoader(private val context: Context) {
                 @Suppress("DEPRECATION")
                 val pkgInfo = pm.getPackageArchiveInfo(file.absolutePath, PackageManager.GET_META_DATA)
                 if (pkgInfo != null) {
-                    // Critical: populate applicationInfo fields so parseExtensionPackage can find resources/metadata
-                    pkgInfo.applicationInfo.sourceDir = file.absolutePath
-                    pkgInfo.applicationInfo.publicSourceDir = file.absolutePath
+                    val appInfo = pkgInfo.applicationInfo
+                    if (appInfo != null) {
+                        appInfo.sourceDir = file.absolutePath
+                        appInfo.publicSourceDir = file.absolutePath
+                    }
                     
                     val extInfo = parseExtensionPackage(pm, pkgInfo)
                     if (extInfo != null) {
@@ -292,7 +354,7 @@ class ExtensionLoader(private val context: Context) {
                 Log.e(tag, "Error parsing local extension file: ${file.name}", e)
             }
         }
-        return extensions
+        return extensions.distinctBy { it.packageName }
     }
 
     /**
@@ -311,6 +373,41 @@ class ExtensionLoader(private val context: Context) {
             }
         }
         return false
+    }
+
+    /**
+     * Wipes every locally downloaded extension bundle and associated DEX/cache artifacts.
+     * Does not touch system-installed extension APKs (PackageManager).
+     */
+    fun clearAllDownloadedBundles(): Int {
+        var deleted = 0
+        val packageNames = classLoaders.keys.toList()
+        for (packageName in packageNames) {
+            invalidateLoadedExtension(packageName)
+        }
+        classLoaders.clear()
+
+        extensionsDir.listFiles()?.forEach { file ->
+            file.setWritable(true)
+            if (file.delete()) deleted++
+        }
+
+        val downloadCache = File(context.cacheDir, "extension_apks")
+        if (downloadCache.exists()) {
+            downloadCache.deleteRecursively()
+        }
+
+        val readOnlyDir = File(context.codeCacheDir, "ext_apk")
+        if (readOnlyDir.exists()) {
+            readOnlyDir.deleteRecursively()
+        }
+
+        context.codeCacheDir.listFiles()
+            ?.filter { it.isDirectory && it.name.startsWith("ext_") }
+            ?.forEach { it.deleteRecursively() }
+
+        Log.i(tag, "Cleared $deleted local extension APK(s) and all extension caches")
+        return deleted
     }
 
     /** Drop cached ClassLoader and read-only APK copy so the next load uses a fresh file. */
@@ -379,10 +476,14 @@ class ExtensionLoader(private val context: Context) {
             pkgInfo.versionCode.toLong()
         }
 
-        val nsfw = metadata.getInt("tachiyomi.extension.nsfw", 0) == 1 || 
-                   metadata.getBoolean("tachiyomi.extension.nsfw", false)
-        
-        // Removed unused hasReadme and hasChangelog
+        val nsfw = when (val raw = metadata.get("tachiyomi.extension.nsfw")) {
+            is Boolean -> raw
+            is Number -> raw.toInt() != 0
+            else -> metadata.getInt("tachiyomi.extension.nsfw", 0) == 1
+        }
+
+        val extensionLibVersion = ExtensionLibCompat.parseVersion(metadata)
+        val libCompatibility = ExtensionLibCompat.check(extensionLibVersion)
 
         // Get the icon
         val icon = try {
@@ -399,7 +500,9 @@ class ExtensionLoader(private val context: Context) {
             sourceClassName = sourceName,
             apkPath = appInfo.sourceDir,
             nsfw = nsfw,
-            icon = icon
+            icon = icon,
+            extensionLibVersion = extensionLibVersion,
+            libCompatibility = libCompatibility,
         )
     }
 
@@ -410,6 +513,12 @@ class ExtensionLoader(private val context: Context) {
      * Returns a list of CatalogueSource instances.
      */
     fun loadExtensionSources(extInfo: ExtensionInfo): List<TachiyomiSource> {
+        if (extInfo.libCompatibility == ExtensionLibCompatibility.TooNew) {
+            throw IllegalStateException(
+                "Extension ${extInfo.packageName} requires extension-lib ${extInfo.extensionLibVersion}; " +
+                    "Radiant supports ${ExtensionLibCompat.SUPPORTED_VERSION}. Please update the app.",
+            )
+        }
         val isLocal = extInfo.apkPath.startsWith(context.filesDir.absolutePath)
         Log.d(tag, "Loading APK: ${extInfo.apkPath} exists=${File(extInfo.apkPath).exists()} local=$isLocal")
 
@@ -533,7 +642,9 @@ data class ExtensionInfo(
     val sourceClassName: String,
     val apkPath: String,
     val nsfw: Boolean = false,
-    val icon: android.graphics.drawable.Drawable? = null
+    val icon: android.graphics.drawable.Drawable? = null,
+    val extensionLibVersion: String? = null,
+    val libCompatibility: ExtensionLibCompatibility = ExtensionLibCompatibility.Compatible,
 )
 
 data class RepoIndex(
@@ -555,8 +666,11 @@ data class RepoExtensionEntry(
     @SerializedName("version") val version: String? = "1.0.0",
     @SerializedName("versionCode") val versionCode: Long = 0,
     @SerializedName(value = "fileName", alternate = ["apk"]) val fileName: String,
+    /** Full APK URL from protobuf repos; preferred over repoUrl + /apk/fileName */
+    @Transient val apkUrl: String? = null,
     @SerializedName(value = "nsfw", alternate = ["isNsfw"]) val nsfw: Int = 0,
     @SerializedName("description") val description: String? = null,
+    @SerializedName("extensionLib") val extensionLibVersion: String? = null,
     @SerializedName("sources") val sources: List<RepoExtensionSource>? = null,
     @Transient var repoUrl: String? = null
 )

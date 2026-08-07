@@ -23,19 +23,26 @@ import androidx.room.withTransaction
  * Repository that delegates all source operations to locally loaded extensions
  */
 class WebtoonRepository(
-    private val appContext: android.content.Context,
+    val appContext: android.content.Context,
     val extensionManager: ExtensionManager,
     val mangaDao: MangaDao,
     val chapterDao: ChapterDao,
     private val historyDao: HistoryDao,
     private val downloadDao: DownloadDao,
-    private val database: WebtoonDatabase
+    private val downloadedChapterDao: DownloadedChapterDao,
+    val database: WebtoonDatabase,
 ) {
     private val categoryDao: CategoryDao get() = database.categoryDao()
 
     companion object {
         /** Must exceed Cloudflare bypass wait (~20s) + HTTP retry (~30s). */
         private const val SEARCH_TIMEOUT_MS = 90_000L
+
+        /** Detail/chapter fetch — shorter than search since only one source is queried. */
+        private const val DETAIL_TIMEOUT_MS = 60_000L
+
+        /** Max parallel source searches during global search. */
+        const val GLOBAL_SEARCH_CONCURRENCY = 4
     }
 
     // ─── Source operations (delegated to local Source instances) ───
@@ -61,58 +68,78 @@ class WebtoonRepository(
      * Prefer [searchAllStreaming] for UI.
      */
     suspend fun searchAll(query: String): GlobalSearchResponse = supervisorScope {
-        val sources = extensionManager.getAllSources()
-        val results = sources.map { source ->
-            async(Dispatchers.IO) {
-                AppWorkQueues.withSourceNetwork {
-                    searchSource(source, query)
-                }
+        val sources = extensionManager.getAllSources().filter { it.isPinned }
+        val results = sources
+            .chunked(GLOBAL_SEARCH_CONCURRENCY)
+            .flatMap { batch ->
+                batch.map { source ->
+                    async(Dispatchers.IO) { searchSource(source, query) }
+                }.awaitAll()
             }
-        }.awaitAll()
 
         GlobalSearchResponse(results)
     }
 
     /**
-     * Streaming version of searchAll — at most 2 sources search at once.
+     * Streaming global search — queries [GLOBAL_SEARCH_CONCURRENCY] pinned sources at a time.
      */
-    fun searchAllStreaming(query: String, targetSources: List<Source> = extensionManager.getAllSources()): kotlinx.coroutines.flow.Flow<SourceSearchResult> = kotlinx.coroutines.flow.channelFlow {
-        val sources = targetSources
+    fun searchAllStreaming(
+        query: String,
+        targetSources: List<Source> = extensionManager.getAllSources().filter { it.isPinned },
+    ): Flow<SourceSearchResult> = kotlinx.coroutines.flow.channelFlow {
+        if (targetSources.isEmpty()) return@channelFlow
 
+        val semaphore = kotlinx.coroutines.sync.Semaphore(GLOBAL_SEARCH_CONCURRENCY)
         supervisorScope {
-            sources.forEach { source ->
+            targetSources.map { source ->
                 launch(Dispatchers.IO) {
-                    val result = AppWorkQueues.withSourceNetwork {
-                        searchSource(source, query)
+                    semaphore.acquire()
+                    try {
+                        send(searchSource(source, query))
+                    } finally {
+                        semaphore.release()
                     }
-                    send(result)
                 }
             }
         }
     }
 
-    private suspend fun searchSource(source: com.radiant.webtoon.core.source.Source, query: String): SourceSearchResult {
+    private suspend fun searchSource(source: com.radiant.webtoon.core.source.Source, query: String, page: Int = 1): SourceSearchResult {
         return try {
             val response = withTimeout(SEARCH_TIMEOUT_MS) {
-                val mangasPage = source.fetchSearchManga(1, query, FilterList())
+                val mangasPage = source.fetchSearchManga(page, query, FilterList())
                 PagedWebtoonResponse(
                     webtoons = mangasPage.mangas.map { it.toWebtoon() },
                     hasNextPage = mangasPage.hasNextPage
                 )
             }
-            SourceSearchResult(source.id, source.name, source.icon, source.lang, response.webtoons, null)
+            SourceSearchResult(
+                source.id, source.name, source.icon, source.lang, response.webtoons, null,
+                hasNextPage = response.hasNextPage,
+                currentPage = page,
+                status = SourceSearchStatus.Success,
+            )
         } catch (e: kotlinx.coroutines.TimeoutCancellationException) {
             android.util.Log.w("GlobalSearch", "Timed out after ${SEARCH_TIMEOUT_MS / 1000}s: ${source.name}")
             SourceSearchResult(
                 source.id, source.name, source.icon, source.lang, emptyList(),
-                "Timed out after ${SEARCH_TIMEOUT_MS / 1000}s"
+                "Timed out after ${SEARCH_TIMEOUT_MS / 1000}s",
+                status = SourceSearchStatus.Error,
             )
         } catch (e: Throwable) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             android.util.Log.e("GlobalSearch", "Search failed for ${source.name}", e)
             val message = e.localizedMessage?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
-            SourceSearchResult(source.id, source.name, source.icon, source.lang, emptyList(), message)
+            SourceSearchResult(
+                source.id, source.name, source.icon, source.lang, emptyList(), message,
+                status = SourceSearchStatus.Error,
+            )
         }
+    }
+
+    suspend fun searchSourceNextPage(sourceId: String, query: String, page: Int): SourceSearchResult? {
+        val source = extensionManager.getSource(sourceId) ?: return null
+        return AppWorkQueues.withSourceNetwork { searchSource(source, query, page) }
     }
 
     suspend fun getWebtoonDetail(sourceId: String, webtoonId: String): Webtoon = withContext(Dispatchers.IO) {
@@ -127,15 +154,16 @@ class WebtoonRepository(
     }
 
     suspend fun getWebtoonDetailAndChapters(sourceId: String, webtoonId: String): Pair<Webtoon, List<com.radiant.webtoon.core.model.Chapter>> =
-        AppWorkQueues.withSourceNetwork {
-            coroutineScope {
+        withTimeout(DETAIL_TIMEOUT_MS) {
+            AppWorkQueues.withSourceNetwork {
+                if (sourceId == com.radiant.webtoon.core.local.LocalSourceIds.LOCAL_SOURCE_ID) {
+                    refreshLocalLibrary()
+                }
                 val source = extensionManager.getSource(sourceId)
                     ?: throw IllegalArgumentException("Source '$sourceId' not found.")
-
-                val detailDeferred = async(Dispatchers.IO) { source.getMangaDetails(webtoonId) }
-                val chaptersDeferred = async(Dispatchers.IO) { source.getChapterList(webtoonId) }
-
-                Pair(detailDeferred.await(), chaptersDeferred.await())
+                // Single combined fetch — avoids concurrent getMangaUpdate on the same manga.
+                val detail = source.getWebtoonDetail(webtoonId)
+                Pair(detail, detail.chapters)
             }
         }
 
@@ -292,32 +320,87 @@ class WebtoonRepository(
     suspend fun getNextPendingDownload(): DownloadTask? = withContext(Dispatchers.IO) { downloadDao.getNextPending() }
     suspend fun addDownload(task: DownloadTask) = withContext(Dispatchers.IO) { downloadDao.insert(task) }
     suspend fun updateDownload(task: DownloadTask) = withContext(Dispatchers.IO) { downloadDao.update(task) }
-    suspend fun deleteDownload(chapterId: String, sourceId: String) = withContext(Dispatchers.IO) { downloadDao.delete(chapterId, sourceId) }
+    suspend fun deleteDownload(chapterId: String, sourceId: String) = withContext(Dispatchers.IO) {
+        downloadDao.delete(chapterId, sourceId)
+        downloadedChapterDao.delete(sourceId, chapterId)
+    }
     suspend fun getDownloadTask(chapterId: String, sourceId: String) = withContext(Dispatchers.IO) { downloadDao.getByChapter(chapterId, sourceId) }
 
-    /** Deletes a completed chapter's on-disk files (SAF URI or plain file tree) plus its DB row. */
+    suspend fun isChapterDownloaded(sourceId: String, chapterId: String): Boolean =
+        withContext(Dispatchers.IO) { downloadedChapterDao.isChapterDownloaded(sourceId, chapterId) }
+
+    suspend fun getDownloadedChapter(sourceId: String, chapterId: String): DownloadedChapter? =
+        withContext(Dispatchers.IO) { downloadedChapterDao.getByChapter(sourceId, chapterId) }
+
+    suspend fun getDownloadedChapterIds(sourceId: String, webtoonId: String): List<String> =
+        withContext(Dispatchers.IO) { downloadedChapterDao.getDownloadedChapterIds(sourceId, webtoonId) }
+
+    fun downloadedChaptersFlow(): Flow<List<DownloadedChapter>> = downloadedChapterDao.getAllFlow()
+
+    fun downloadedChaptersForWebtoonFlow(sourceId: String, webtoonId: String) =
+        downloadedChapterDao.getByWebtoonFlow(sourceId, webtoonId)
+
+    suspend fun getDownloadedWebtoonKeys(): Set<String> = withContext(Dispatchers.IO) {
+        downloadedChapterDao.getDownloadedWebtoonKeys().toSet()
+    }
+
+    suspend fun registerDownloadedChapter(
+        sourceId: String,
+        chapterId: String,
+        webtoonId: String,
+        webtoonTitle: String,
+        chapterTitle: String,
+        sourceName: String,
+        localDirectory: String,
+        pageCount: Int,
+        fileSizeBytes: Long = 0L,
+    ) = withContext(Dispatchers.IO) {
+        downloadedChapterDao.insert(
+            DownloadedChapter(
+                sourceId = sourceId,
+                chapterId = chapterId,
+                webtoonId = webtoonId,
+                webtoonTitle = webtoonTitle,
+                chapterTitle = chapterTitle,
+                sourceName = sourceName,
+                localDirectory = localDirectory,
+                pageCount = pageCount,
+                fileSizeBytes = fileSizeBytes,
+            ),
+        )
+    }
+
+    suspend fun getAllDownloadedChapters(): List<DownloadedChapter> =
+        withContext(Dispatchers.IO) { downloadedChapterDao.getAll() }
+
+    /** Deletes a completed chapter's on-disk files (SAF URI or plain file tree) plus its DB rows. */
     suspend fun deleteDownloadedChapter(chapterId: String, sourceId: String) = withContext(Dispatchers.IO) {
+        val indexed = downloadedChapterDao.getByChapter(sourceId, chapterId)
         val task = downloadDao.getByChapter(chapterId, sourceId)
-        if (task != null) {
+        val localPath = indexed?.localDirectory ?: task?.localPath
+        if (localPath != null) {
+            deleteDownloadFilesAtPath(localPath)
+        } else if (task != null) {
             deleteDownloadFiles(task)
-            downloadDao.delete(chapterId, sourceId)
         }
+        downloadDao.delete(chapterId, sourceId)
+        downloadedChapterDao.delete(sourceId, chapterId)
     }
 
     /** Batch form of [deleteDownloadedChapter] for multi-select delete. */
     suspend fun deleteDownloadedChapters(chapters: List<Pair<String, String>>) = withContext(Dispatchers.IO) {
         for ((chapterId, sourceId) in chapters) {
-            val task = downloadDao.getByChapter(chapterId, sourceId)
-            if (task != null) {
-                deleteDownloadFiles(task)
-                downloadDao.delete(chapterId, sourceId)
-            }
+            deleteDownloadedChapter(chapterId, sourceId)
         }
     }
 
     /** Deletes the on-disk file(s) for a [DownloadTask], without touching its DB row. */
     fun deleteDownloadFiles(task: DownloadTask) {
         val path = task.localPath ?: return
+        deleteDownloadFilesAtPath(path)
+    }
+
+    private fun deleteDownloadFilesAtPath(path: String) {
         try {
             if (path.startsWith("content://")) {
                 androidx.documentfile.provider.DocumentFile.fromSingleUri(appContext, android.net.Uri.parse(path))
@@ -331,8 +414,14 @@ class WebtoonRepository(
                 }
             }
         } catch (e: Exception) {
-            android.util.Log.e("WebtoonRepository", "Failed to delete download files for ${task.chapterId}", e)
+            android.util.Log.e("WebtoonRepository", "Failed to delete download files at $path", e)
         }
+    }
+
+    suspend fun refreshLocalLibrary() = withContext(Dispatchers.IO) {
+        val app = appContext.applicationContext as? com.radiant.webtoon.WebtoonApplication
+            ?: return@withContext
+        app.localLibraryManager.refresh()
     }
 
     private fun SManga.toWebtoon(): Webtoon {

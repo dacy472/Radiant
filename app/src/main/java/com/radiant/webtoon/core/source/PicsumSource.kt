@@ -24,9 +24,7 @@ class PicsumSource(
     override val name: String = "Picsum Demo"
     override val baseUrl: String = "https://picsum.photos"
     override val lang: String = "en"
-    override var isPinned: Boolean
-        get() = TODO("Not yet implemented")
-        set(value) {}
+    override var isPinned: Boolean = false
     override val icon: String = "\uD83D\uDDBC\uFE0F"
     override val capabilities: SourceCapabilities = SourceCapabilities(
         supportsSearch = true,

@@ -1,0 +1,1 @@
+{"version":3,"file":"scrapingMethods.js","sourceRoot":"","sources":["../../src/runtime/scrapingMethods.ts"],"names":[],"mappings":"AAAA,8FAA8F;AAC9F,MAAM,CAAC,MAAM,uBAAuB,GAAG;IACrC,mBAAmB;IACnB,gBAAgB;IAChB,aAAa;IACb,mBAAmB;IACnB,kBAAkB;IAClB,kBAAkB;CACV,CAAC;AAIX,MAAM,UAAU,sBAAsB,CAAC,MAAc;IACnD,OAAQ,uBAA6C,CAAC,QAAQ,CAAC,MAAM,CAAC,CAAC;AACzE,CAAC"}

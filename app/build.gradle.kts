@@ -8,12 +8,12 @@ plugins {
 
 android {
     namespace = "com.radiant.webtoon"
-    compileSdk = 34
+    compileSdk = 36
 
     defaultConfig {
         applicationId = "com.radiant.webtoon"
         minSdk = 26
-        targetSdk = 34
+        targetSdk = 36
         versionCode = 1
         versionName = "1.0"
 
@@ -40,6 +40,7 @@ android {
     }
     buildFeatures {
         compose = true
+        buildConfig = true
     }
     packaging {
         resources {
@@ -73,15 +74,21 @@ dependencies {
     implementation("androidx.room:room-ktx:$roomVersion")
     ksp("androidx.room:room-compiler:$roomVersion")
 
-    // Networking — OkHttp 5.x required by modern Keiyoushi/Mihon extensions (e.g. MangaDex)
-    implementation("com.squareup.okhttp3:okhttp:5.3.2")
-    implementation("com.squareup.okhttp3:okhttp-dnsoverhttps:5.3.2")
-    implementation("com.squareup.okhttp3:logging-interceptor:5.3.2")
+    // Networking — OkHttp 5.4.x aligned with TachiyomiX 1.6
+    val okhttpVersion = "5.4.0"
+    implementation("com.squareup.okhttp3:okhttp:$okhttpVersion")
+    implementation("com.squareup.okhttp3:okhttp-dnsoverhttps:$okhttpVersion")
+    implementation("com.squareup.okhttp3:logging-interceptor:$okhttpVersion")
+    implementation("com.squareup.okhttp3:okhttp-brotli:$okhttpVersion")
+    implementation("com.squareup.okhttp3:okhttp-zstd:$okhttpVersion")
     implementation("com.squareup.retrofit2:retrofit:2.11.0")
     implementation("com.squareup.retrofit2:converter-gson:2.11.0")
 
     // Jsoup — HTML parsing for scraping manga sites
-    implementation("org.jsoup:jsoup:1.17.2")
+    implementation("org.jsoup:jsoup:1.22.2")
+
+    // TachiyomiX stubs: optional compileOnly drift check when available on JitPack
+    // compileOnly("com.github.mihonapp:tachiyomix:1.6")
 
     // RxJava — required for Tachiyomi extension Source interface compatibility
     implementation("io.reactivex:rxjava:1.3.8")

@@ -2,9 +2,12 @@ package eu.kanade.tachiyomi.network
 
 import android.content.Context
 import eu.kanade.tachiyomi.network.interceptor.CloudflareInterceptor
+import eu.kanade.tachiyomi.network.interceptor.FlameComicsJsonRepairInterceptor
+import eu.kanade.tachiyomi.network.interceptor.UncaughtExceptionInterceptor
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import okhttp3.Cache
 import okhttp3.Dns
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
@@ -96,9 +99,21 @@ class NetworkHelper(context: Context) {
             .writeTimeout(30, TimeUnit.SECONDS)
             // Cap overall call so orphaned CF/HTTP work cannot run forever
             .callTimeout(75, TimeUnit.SECONDS)
+            .cache(
+                Cache(
+                    directory = context.cacheDir.resolve("network_cache"),
+                    maxSize = 5L * 1024 * 1024, // 5 MiB — matches Mihon defaults
+                )
+            )
+            // Application interceptors run in add order (first added = earliest on outbound requests).
+            // User-Agent + Client Hints must be set before cookies, logging, Cloudflare, and any
+            // extension-specific interceptors appended via client.newBuilder().addInterceptor().
             .addInterceptor(userAgentInterceptor)
+            // Required by Keiyoushi/Mihon extensions (validates presence at runtime)
+            .addInterceptor(UncaughtExceptionInterceptor())
             .addInterceptor(cookieInterceptor)
             .addInterceptor(logging)
+            .addInterceptor(FlameComicsJsonRepairInterceptor())
             .cookieJar(cookieJar)
             .addInterceptor(cloudflareInterceptor)
             .build()

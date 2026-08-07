@@ -36,6 +36,18 @@ interface DownloadDao {
     @Query("SELECT * FROM downloads WHERE status = 'DOWNLOADING' OR status = 'PENDING' ORDER BY orderIndex ASC, dateAdded ASC LIMIT 1")
     suspend fun getNextPending(): DownloadTask?
 
+    @Query("SELECT * FROM downloads WHERE status = 'PENDING' ORDER BY orderIndex ASC, dateAdded ASC LIMIT 1")
+    suspend fun getNextPendingOnly(): DownloadTask?
+
+    @Query("SELECT * FROM downloads WHERE status = 'PENDING' ORDER BY orderIndex ASC, dateAdded ASC LIMIT :limit")
+    suspend fun getPendingLimit(limit: Int): List<DownloadTask>
+
+    @Query("SELECT COUNT(*) FROM downloads WHERE status = 'DOWNLOADING'")
+    suspend fun countDownloading(): Int
+
+    @Query("SELECT EXISTS(SELECT 1 FROM downloads WHERE status IN ('PENDING', 'DOWNLOADING', 'PAUSED'))")
+    suspend fun hasActiveWork(): Boolean
+
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(task: DownloadTask)
 
