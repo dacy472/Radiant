@@ -37,7 +37,7 @@ class NetworkHelper(context: Context) {
     /**
      * Interceptor to bypass Cloudflare blank pages.
      */
-    val cloudflareInterceptor = CloudflareInterceptor(context, cookieJar)
+    val cloudflareInterceptor = CloudflareInterceptor(context, cookieJar, userAgentInterceptor)
 
     /**
      * Standard client for general requests.
@@ -97,8 +97,9 @@ class NetworkHelper(context: Context) {
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
-            // Cap overall call so orphaned CF/HTTP work cannot run forever
-            .callTimeout(75, TimeUnit.SECONDS)
+            // Cap overall call so orphaned CF/HTTP work cannot run forever.
+            // Cloudflare bypass can take ~25s headless + up to 120s visible before retry.
+            .callTimeout(180, TimeUnit.SECONDS)
             .cache(
                 Cache(
                     directory = context.cacheDir.resolve("network_cache"),

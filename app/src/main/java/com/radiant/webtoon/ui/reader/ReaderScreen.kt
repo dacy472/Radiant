@@ -34,6 +34,7 @@ import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SwapHoriz
 import androidx.compose.material.icons.filled.SwapVert
 import androidx.compose.foundation.layout.width
+import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -88,7 +89,8 @@ fun ReaderScreen(
     webtoonId: String,
     chapterId: String,
     chapterTitle: String,
-    onBackClick: () -> Unit
+    onBackClick: () -> Unit,
+    onOpenWebView: (url: String) -> Unit = {},
 ) {
     val context = LocalContext.current
     val view = LocalView.current
@@ -113,6 +115,7 @@ fun ReaderScreen(
     )
     val pages by viewModel.pages.collectAsStateWithLifecycle()
     val isLoading by viewModel.isLoading.collectAsStateWithLifecycle()
+    val pageError by viewModel.pageError.collectAsStateWithLifecycle()
     val sourceHeaders by viewModel.sourceHeaders.collectAsStateWithLifecycle()
     
     val readingMode by viewModel.readingMode.collectAsStateWithLifecycle()
@@ -242,7 +245,23 @@ fun ReaderScreen(
         if (isLoading) {
             CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
         } else if (sortedPages.isEmpty()) {
-            Text("No pages found", modifier = Modifier.align(Alignment.Center), color = Color.White)
+            when (val error = pageError) {
+                is ReaderPageError.CloudflareBlocked -> {
+                    CloudflareReaderOverlay(
+                        onOpenWebView = { onOpenWebView(error.chapterUrl) },
+                        onRetry = {
+                            viewModel.loadChapter(sourceId, webtoonId, chapterId, chapterTitle)
+                        },
+                    )
+                }
+                else -> {
+                    Text(
+                        "No pages found",
+                        modifier = Modifier.align(Alignment.Center),
+                        color = Color.White,
+                    )
+                }
+            }
         } else {
             if (readingMode == 0) {
                 VirtualizedWebtoonColumn(
@@ -488,6 +507,64 @@ fun ReaderScreen(
                 viewModel = viewModel,
                 onDismiss = { showSettingsSheet = false }
             )
+        }
+    }
+}
+
+@Composable
+private fun CloudflareReaderOverlay(
+    onOpenWebView: () -> Unit,
+    onRetry: () -> Unit,
+) {
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(Color.Black.copy(alpha = 0.92f)),
+        contentAlignment = Alignment.Center,
+    ) {
+        Surface(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(24.dp),
+            shape = RoundedCornerShape(16.dp),
+            color = Color(0xFF1A1A1A),
+        ) {
+            Column(
+                modifier = Modifier.padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(
+                    text = "Cloudflare Protection Active",
+                    style = MaterialTheme.typography.titleLarge,
+                    color = Color.White,
+                    fontWeight = FontWeight.Bold,
+                )
+                Spacer(Modifier.height(12.dp))
+                Text(
+                    text = "Please solve captcha in WebView",
+                    style = MaterialTheme.typography.bodyLarge,
+                    color = Color.White.copy(alpha = 0.85f),
+                )
+                Spacer(Modifier.height(24.dp))
+                Button(
+                    onClick = onOpenWebView,
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = MaterialTheme.colorScheme.primary,
+                    ),
+                ) {
+                    Text("Open site in WebView")
+                }
+                Spacer(Modifier.height(12.dp))
+                OutlinedButton(
+                    onClick = onRetry,
+                    modifier = Modifier.fillMaxWidth(),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, Color.White.copy(alpha = 0.5f)),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White),
+                ) {
+                    Text("Retry loading chapter")
+                }
+            }
         }
     }
 }

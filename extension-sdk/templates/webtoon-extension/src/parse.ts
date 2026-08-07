@@ -17,6 +17,7 @@ import type {
   WebtoonSummary,
 } from '@radiant/extension-sdk';
 import { absoluteUrl } from './http.js';
+import { extractImageUrlsFromEmbeddedJson } from './embeddedJsonPages.js';
 
 // ─── Detail page ─────────────────────────────────────────────────────────────
 
@@ -176,8 +177,11 @@ export function parseChapterList(html: string, baseUrl: string): Chapter[] {
  *
  * Some sites embed JSON instead of bare img tags:
  * ```html
- * <script>var chapterImages = ["https://…/01.jpg","https://…/02.jpg"];</script>
+ * <script id="__NEXT_DATA__" type="application/json">{"props":{"pageProps":{"images":["https://…/01.jpg"]}}}</script>
  * ```
+ *
+ * When DOM/img scraping finds nothing, `extractImageUrlsFromEmbeddedJson` walks
+ * __NEXT_DATA__ (and similar) script payloads recursively for image URL arrays.
  *
  * cheerio sketch:
  * ```ts
@@ -201,9 +205,22 @@ export function parsePageList(
   chapterUrl: UrlString,
   baseUrl: string,
 ): PageUrl[] {
+  const pages = parsePageListFromDom(html, chapterUrl, baseUrl);
+  if (pages.length > 0) {
+    return pages;
+  }
+
+  return parsePageListFromEmbeddedJson(html, chapterUrl, baseUrl);
+}
+
+/** Strategy 1: `<img>` tags and lazy-load attributes in the reader markup. */
+function parsePageListFromDom(
+  html: string,
+  chapterUrl: UrlString,
+  baseUrl: string,
+): PageUrl[] {
   const pages: PageUrl[] = [];
 
-  // Strategy 1: <img> tags in reading container
   const imgPattern =
     /<img[^>]+(?:data-src|data-lazy-src|src)=["']([^"']+\.(?:jpg|jpeg|png|webp)(?:\?[^"']*)?)["'][^>]*>/gi;
 
@@ -218,18 +235,21 @@ export function parsePageList(
     });
   }
 
-  // Strategy 2: JSON array embedded in a script tag (uncomment / adapt):
-  // const jsonMatch = html.match(/chapterImages\s*=\s*(\[[\s\S]*?\]);/);
-  // if (jsonMatch) {
-  //   const urls: string[] = JSON.parse(jsonMatch[1]!);
-  //   return urls.map((url, index) => ({
-  //     index,
-  //     url: absoluteUrl(baseUrl, url),
-  //     headers: { Referer: chapterUrl },
-  //   }));
-  // }
-
   return pages;
+}
+
+/** Strategy 2: JSON embedded in `<script id="__NEXT_DATA__">` and similar blocks. */
+function parsePageListFromEmbeddedJson(
+  html: string,
+  chapterUrl: UrlString,
+  baseUrl: string,
+): PageUrl[] {
+  const urls = extractImageUrlsFromEmbeddedJson(html);
+  return urls.map((url, index) => ({
+    index,
+    url: absoluteUrl(baseUrl, url),
+    headers: { Referer: chapterUrl },
+  }));
 }
 
 // ─── Browse / search grids ─────────────────────────────────────────────────

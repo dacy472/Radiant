@@ -166,6 +166,47 @@ abstract class HttpSource : CatalogueSource {
 
     protected open fun pageListParse(response: Response): List<Page> = throw UnsupportedOperationException()
 
+    /**
+     * Fetches the page list and returns HTTP status metadata alongside parsed pages.
+     * Used by the reader to distinguish Cloudflare blocks from genuinely empty chapters.
+     */
+    @Suppress("DEPRECATION")
+    fun fetchPageListWithMetadata(chapter: SChapter): PageListFetchResult {
+        return try {
+            val request = pageListRequest(chapter)
+            client.newCall(request).execute().use { response ->
+                val status = response.code
+                val chapterUrl = request.url.toString()
+                val challengeHtml = eu.kanade.tachiyomi.network.interceptor.CloudflareChallengeDetector
+                    .peekChallengeHtml(response)
+                val statusChallenge = status in eu.kanade.tachiyomi.network.interceptor
+                    .CloudflareChallengeDetector.CHALLENGE_STATUS_CODES &&
+                    (
+                        eu.kanade.tachiyomi.network.interceptor.CloudflareChallengeDetector
+                            .isChallengeResponse(response) ||
+                            challengeHtml
+                        )
+                val pages = pageListParse(response)
+                val cloudflareChallenge = statusChallenge ||
+                    (pages.isEmpty() && challengeHtml && status != 404)
+                PageListFetchResult(
+                    pages = pages,
+                    httpStatus = status,
+                    chapterUrl = chapterUrl,
+                    cloudflareChallenge = cloudflareChallenge,
+                )
+            }
+        } catch (e: java.io.IOException) {
+            val isCloudflare = e.message?.contains("cloudflare", ignoreCase = true) == true
+            PageListFetchResult(
+                pages = emptyList(),
+                httpStatus = if (isCloudflare) 403 else -1,
+                chapterUrl = getChapterUrl(chapter),
+                cloudflareChallenge = isCloudflare,
+            )
+        }
+    }
+
     // ─── Image URL ───
 
     @Deprecated("Use the suspend API instead", ReplaceWith("getImageUrl"))

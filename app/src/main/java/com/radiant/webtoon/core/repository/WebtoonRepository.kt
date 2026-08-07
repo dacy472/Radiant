@@ -167,18 +167,22 @@ class WebtoonRepository(
             }
         }
 
-    suspend fun getChapterPages(sourceId: String, chapterId: String): List<String> = withContext(Dispatchers.IO) {
-        AppWorkQueues.withSourceNetwork {
-            val source = extensionManager.getSource(sourceId)
-                ?: throw IllegalArgumentException("Source '$sourceId' not found.")
-            try {
-                source.getChapterPages(chapterId)
-            } catch (e: Exception) {
-                android.util.Log.e("RADIANT_ERROR", "Failed to fetch pages for $chapterId", e)
-                throw e
+    suspend fun getChapterPages(sourceId: String, chapterId: String): List<String> =
+        getChapterPagesResult(sourceId, chapterId).pages
+
+    suspend fun getChapterPagesResult(sourceId: String, chapterId: String): com.radiant.webtoon.core.model.ChapterPagesResult =
+        withContext(Dispatchers.IO) {
+            AppWorkQueues.withSourceNetwork {
+                val source = extensionManager.getSource(sourceId)
+                    ?: throw IllegalArgumentException("Source '$sourceId' not found.")
+                try {
+                    source.getChapterPagesResult(chapterId)
+                } catch (e: Exception) {
+                    android.util.Log.e("RADIANT_ERROR", "Failed to fetch pages for $chapterId", e)
+                    throw e
+                }
             }
         }
-    }
 
     // ─── Manga / Library operations (local Room DB) ───
 

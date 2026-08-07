@@ -2,6 +2,7 @@ package com.radiant.webtoon.ui.extensions
 
 import android.annotation.SuppressLint
 import android.os.Bundle
+import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
 import android.webkit.WebView
@@ -18,36 +19,43 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import eu.kanade.tachiyomi.network.NetworkHelper
-import uy.kohesive.injekt.Injekt
-import uy.kohesive.injekt.api.get
+import eu.kanade.tachiyomi.network.interceptor.CloudflareBypassGate
+import eu.kanade.tachiyomi.network.interceptor.CloudflareChallengeDetector
+import okhttp3.HttpUrl.Companion.toHttpUrl
+import uy.kohesive.injekt.injectLazy
 
+/**
+ * Visible Cloudflare bypass UI — opened automatically when headless WebView solving fails.
+ */
 class CloudflareBypassActivity : ComponentActivity() {
 
-    private val networkHelper: NetworkHelper = Injekt.get()
+    private val networkHelper: NetworkHelper by injectLazy()
     private var webView: WebView? = null
+    private var finished = false
 
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        val url = intent.getStringExtra("url") ?: "https://google.com"
-        val extensionName = intent.getStringExtra("name") ?: "Extension"
+        val url = intent.getStringExtra(EXTRA_URL) ?: "https://google.com"
+        val extensionName = intent.getStringExtra(EXTRA_NAME) ?: url
 
         setContent {
-            var currentUrl by remember { mutableStateOf(url) }
-            var canGoBack by remember { mutableStateOf(false) }
-
             Scaffold(
                 topBar = {
                     TopAppBar(
                         title = {
                             Column {
-                                Text(extensionName, style = MaterialTheme.typography.titleMedium)
-                                Text(currentUrl, style = MaterialTheme.typography.bodySmall, maxLines = 1)
+                                Text("Cloudflare check", style = MaterialTheme.typography.titleMedium)
+                                Text(
+                                    extensionName,
+                                    style = MaterialTheme.typography.bodySmall,
+                                    maxLines = 1,
+                                )
                             }
                         },
                         navigationIcon = {
-                            IconButton(onClick = { finish() }) {
+                            IconButton(onClick = { finishWithResult(success = false) }) {
                                 Icon(Icons.Default.ArrowBack, contentDescription = "Back")
                             }
                         },
@@ -56,18 +64,16 @@ class CloudflareBypassActivity : ComponentActivity() {
                                 Icon(Icons.Default.Refresh, contentDescription = "Refresh")
                             }
                             Button(
-                                onClick = { 
-                                    syncAndFinish()
-                                },
-                                modifier = Modifier.padding(end = 8.dp)
+                                onClick = { finishWithResult(success = true) },
+                                modifier = Modifier.padding(end = 8.dp),
                             ) {
                                 Icon(Icons.Default.Check, contentDescription = null)
                                 Spacer(Modifier.width(4.dp))
-                                Text("DONE")
+                                Text("Done")
                             }
-                        }
+                        },
                     )
-                }
+                },
             ) { padding ->
                 AndroidViewBinding(padding, url) { wv ->
                     webView = wv
@@ -77,15 +83,19 @@ class CloudflareBypassActivity : ComponentActivity() {
     }
 
     @Composable
-    private fun AndroidViewBinding(padding: PaddingValues, url: String, onWebViewCreated: (WebView) -> Unit) {
+    private fun AndroidViewBinding(
+        padding: PaddingValues,
+        url: String,
+        onWebViewCreated: (WebView) -> Unit,
+    ) {
         androidx.compose.ui.viewinterop.AndroidView(
             factory = { context ->
                 WebView(context).apply {
                     layoutParams = android.view.ViewGroup.LayoutParams(
                         android.view.ViewGroup.LayoutParams.MATCH_PARENT,
-                        android.view.ViewGroup.LayoutParams.MATCH_PARENT
+                        android.view.ViewGroup.LayoutParams.MATCH_PARENT,
                     )
-                    
+
                     settings.apply {
                         javaScriptEnabled = true
                         domStorageEnabled = true
@@ -93,37 +103,81 @@ class CloudflareBypassActivity : ComponentActivity() {
                         useWideViewPort = true
                         loadWithOverviewMode = true
                         cacheMode = WebSettings.LOAD_DEFAULT
-                        // Set a generic mobile user agent if none is set
                         userAgentString = networkHelper.userAgentInterceptor.userAgent
                     }
 
                     webViewClient = object : WebViewClient() {
-                        override fun onPageFinished(view: WebView?, url: String?) {
-                            super.onPageFinished(view, url)
-                            // We could auto-sync here if we detect specific cookies
+                        override fun onPageFinished(view: WebView?, finishedUrl: String?) {
+                            super.onPageFinished(view, finishedUrl)
+                            val cookies = CookieManager.getInstance().getCookie(finishedUrl ?: url)
+                            if (CloudflareChallengeDetector.hasClearanceCookie(cookies)) {
+                                finishWithResult(success = true)
+                            }
                         }
                     }
-                    
+
                     webChromeClient = WebChromeClient()
-                    
+                    CookieManager.getInstance().setAcceptCookie(true)
+                    CookieManager.getInstance().setAcceptThirdPartyCookies(this, true)
                     loadUrl(url)
                     onWebViewCreated(this)
                 }
             },
-            modifier = Modifier.padding(padding).fillMaxSize()
+            modifier = Modifier
+                .padding(padding)
+                .fillMaxSize(),
         )
     }
 
-    private fun syncAndFinish() {
-        webView?.let { view ->
-            val newUserAgent = view.settings.userAgentString
-            networkHelper.userAgentInterceptor.userAgent = newUserAgent
-            
-            // Cookies are automatically synced via WebViewCookieJar as it uses CookieManager.getInstance()
-            // which handles the shared preference storage for WebViews.
-            
-            android.util.Log.d("CloudflareBypass", "Synced User-Agent: $newUserAgent")
-            finish()
+    private fun finishWithResult(success: Boolean) {
+        if (finished) return
+        finished = true
+
+        val url = intent.getStringExtra(EXTRA_URL)
+        val userAgent = webView?.settings?.userAgentString
+        if (success) {
+            if (!userAgent.isNullOrBlank()) {
+                networkHelper.userAgentInterceptor.userAgent = userAgent
+            }
+            if (!url.isNullOrBlank()) {
+                syncCookiesToJar(url)
+            }
         }
+
+        CloudflareBypassGate.complete(
+            CloudflareBypassGate.BypassResult(
+                success = success,
+                userAgent = userAgent,
+            ),
+        )
+        finish()
+    }
+
+    private fun syncCookiesToJar(url: String) {
+        try {
+            val rawCookies = CookieManager.getInstance().getCookie(url) ?: return
+            val httpUrl = url.toHttpUrl()
+            val cookies = rawCookies.split("; ")
+                .mapNotNull { part -> okhttp3.Cookie.parse(httpUrl, part.trim()) }
+            if (cookies.isNotEmpty()) {
+                networkHelper.cookieJar.saveFromResponse(httpUrl, cookies)
+            }
+        } catch (_: Exception) {
+            // Best-effort cookie bridge
+        }
+    }
+
+    override fun onDestroy() {
+        if (!finished) {
+            CloudflareBypassGate.complete(CloudflareBypassGate.BypassResult(success = false))
+        }
+        webView?.destroy()
+        webView = null
+        super.onDestroy()
+    }
+
+    companion object {
+        const val EXTRA_URL = "url"
+        const val EXTRA_NAME = "name"
     }
 }

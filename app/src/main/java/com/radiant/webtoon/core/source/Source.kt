@@ -46,8 +46,25 @@ interface Source {
     suspend fun getChapterPages(chapterId: String): List<String>
 
     /**
+     * Fetches chapter pages with HTTP metadata for reader error handling.
+     */
+    suspend fun getChapterPagesResult(chapterId: String): com.radiant.webtoon.core.model.ChapterPagesResult {
+        val pages = getChapterPages(chapterId)
+        return com.radiant.webtoon.core.model.ChapterPagesResult(pages = pages)
+    }
+
+    /**
+     * Absolute URL for the chapter page on the source site (for WebView / Cloudflare bypass).
+     */
+    fun getChapterPageUrl(chapterId: String): String {
+        if (chapterId.startsWith("http://") || chapterId.startsWith("https://")) return chapterId
+        val base = baseUrl.trimEnd('/')
+        val path = chapterId.trimStart('/')
+        return if (base.isEmpty()) path else "$base/$path"
+    }
+
+    /**
      * Absolute URL for the manga/webtoon page on the source site (for WebView / open in browser).
-     * Default joins [baseUrl] and [webtoonId] with a single slash.
      */
     fun getMangaPageUrl(webtoonId: String): String {
         if (webtoonId.startsWith("http://") || webtoonId.startsWith("https://")) return webtoonId

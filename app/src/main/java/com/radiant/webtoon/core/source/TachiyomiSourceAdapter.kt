@@ -7,6 +7,7 @@ import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
 import com.radiant.webtoon.core.model.*
+import eu.kanade.tachiyomi.source.model.PageListFetchResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Headers
@@ -328,31 +329,79 @@ class TachiyomiSourceAdapter(
         }
     }
 
-    override suspend fun getChapterPages(chapterId: String): List<String> = withContext(Dispatchers.IO) {
-        try {
-            val chapter = eu.kanade.tachiyomi.source.model.SChapter.create().apply {
-                url = chapterId
-            }
+    override suspend fun getChapterPages(chapterId: String): List<String> =
+        getChapterPagesResult(chapterId).pages
 
-            val pages = tachiyomiSource.getPageList(chapter)
+    override suspend fun getChapterPagesResult(chapterId: String): ChapterPagesResult =
+        withContext(Dispatchers.IO) {
+            try {
+                val chapter = eu.kanade.tachiyomi.source.model.SChapter.create().apply {
+                    url = chapterId
+                }
 
-            pages.mapNotNull { page ->
-                when {
-                    !page.imageUrl.isNullOrEmpty() -> page.imageUrl
-                    page.url.isNotEmpty() && tachiyomiSource is HttpSource -> {
-                        try {
-                            tachiyomiSource.getImageUrl(page)
-                        } catch (e: Exception) {
-                            Log.e(tag, "Failed to resolve image URL for page ${page.index}", e)
-                            null
-                        }
+                val fetch = when (val httpSource = tachiyomiSource as? HttpSource) {
+                    null -> {
+                        val pages = tachiyomiSource.getPageList(chapter)
+                        PageListFetchResult(
+                            pages = pages,
+                            httpStatus = -1,
+                            chapterUrl = getChapterPageUrl(chapterId),
+                            cloudflareChallenge = false,
+                        )
                     }
-                    else -> null
+                    else -> httpSource.fetchPageListWithMetadata(chapter)
+                }
+
+                ChapterPagesResult(
+                    pages = mapPageUrls(fetch.pages),
+                    httpStatus = fetch.httpStatus.takeIf { it >= 0 },
+                    chapterUrl = fetch.chapterUrl,
+                    cloudflareChallenge = fetch.cloudflareChallenge,
+                )
+            } catch (e: Exception) {
+                Log.e(tag, "Failed to get chapter pages: $chapterId", e)
+                val isCloudflare = e.message?.contains("cloudflare", ignoreCase = true) == true
+                if (isCloudflare) {
+                    ChapterPagesResult(
+                        pages = emptyList(),
+                        httpStatus = 403,
+                        chapterUrl = getChapterPageUrl(chapterId),
+                        cloudflareChallenge = true,
+                    )
+                } else {
+                    throw friendlyError(e, "Failed to load chapter pages")
                 }
             }
-        } catch (e: Exception) {
-            Log.e(tag, "Failed to get chapter pages: $chapterId", e)
-            throw friendlyError(e, "Failed to load chapter pages")
+        }
+
+    override fun getChapterPageUrl(chapterId: String): String {
+        val chapter = eu.kanade.tachiyomi.source.model.SChapter.create().apply { url = chapterId }
+        val http = tachiyomiSource as? HttpSource
+        return if (http != null) {
+            try {
+                http.getChapterUrl(chapter)
+            } catch (_: Exception) {
+                super.getChapterPageUrl(chapterId)
+            }
+        } else {
+            super.getChapterPageUrl(chapterId)
+        }
+    }
+
+    private suspend fun mapPageUrls(pages: List<eu.kanade.tachiyomi.source.model.Page>): List<String> {
+        return pages.mapNotNull { page ->
+            when {
+                !page.imageUrl.isNullOrEmpty() -> page.imageUrl
+                page.url.isNotEmpty() && tachiyomiSource is HttpSource -> {
+                    try {
+                        (tachiyomiSource as HttpSource).getImageUrl(page)
+                    } catch (e: Exception) {
+                        Log.e(tag, "Failed to resolve image URL for page ${page.index}", e)
+                        null
+                    }
+                }
+                else -> null
+            }
         }
     }
 

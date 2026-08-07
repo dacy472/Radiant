@@ -9,6 +9,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.radiant.webtoon.WebtoonApplication
+import com.radiant.webtoon.core.model.ChapterPagesResult
 import com.radiant.webtoon.core.repository.WebtoonRepository
 import com.radiant.webtoon.core.database.Chapter
 import com.radiant.webtoon.core.source.TachiyomiSourceAdapter
@@ -19,6 +20,11 @@ import kotlinx.coroutines.launch
 import okhttp3.Headers
 import java.io.File
 import java.util.zip.ZipFile
+
+sealed class ReaderPageError {
+    data class CloudflareBlocked(val chapterUrl: String) : ReaderPageError()
+    data object NoPages : ReaderPageError()
+}
 
 class ReaderViewModel(
     application: Application,
@@ -31,6 +37,9 @@ class ReaderViewModel(
 
     private val _isLoading = MutableStateFlow(false)
     val isLoading: StateFlow<Boolean> = _isLoading
+
+    private val _pageError = MutableStateFlow<ReaderPageError?>(null)
+    val pageError: StateFlow<ReaderPageError?> = _pageError
 
     /** HTTP headers from the source (User-Agent, Referer, etc.) for Coil image requests. */
     private val _sourceHeaders = MutableStateFlow(Headers.headersOf())
@@ -124,6 +133,7 @@ class ReaderViewModel(
         currentWebtoonId = webtoonId
         currentChapterId = chapterId
         _isLoading.value = true
+        _pageError.value = null
         
         viewModelScope.launch {
             // Fetch adjacent chapters to identify "Next"
@@ -183,12 +193,38 @@ class ReaderViewModel(
                 }
 
                 // Fallback to network
-                val pages = repository.getChapterPages(sourceId, chapterId)
-                _pages.value = pages
+                val result = repository.getChapterPagesResult(sourceId, chapterId)
+                _pages.value = result.pages
+                if (result.pages.isEmpty()) {
+                    _pageError.value = resolvePageError(result, chapterId, source)
+                }
             } catch (e: Exception) {
                 _pages.value = emptyList()
+                val app = getApplication<WebtoonApplication>()
+                val source = app.extensionManager.getSource(sourceId)
+                if (e.message?.contains("cloudflare", ignoreCase = true) == true) {
+                    _pageError.value = ReaderPageError.CloudflareBlocked(
+                        chapterUrl = source?.getChapterPageUrl(chapterId) ?: chapterId,
+                    )
+                } else {
+                    _pageError.value = ReaderPageError.NoPages
+                }
             }
             _isLoading.value = false
+        }
+    }
+
+    private fun resolvePageError(
+        result: ChapterPagesResult,
+        chapterId: String,
+        source: com.radiant.webtoon.core.source.Source?,
+    ): ReaderPageError {
+        return if (result.isCloudflareBlocked()) {
+            ReaderPageError.CloudflareBlocked(
+                chapterUrl = result.chapterUrl ?: source?.getChapterPageUrl(chapterId) ?: chapterId,
+            )
+        } else {
+            ReaderPageError.NoPages
         }
     }
 

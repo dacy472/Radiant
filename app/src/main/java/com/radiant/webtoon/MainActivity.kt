@@ -469,7 +469,12 @@ fun WebtoonApp() {
                     webtoonId = webtoonId,
                     chapterId = chapterId,
                     chapterTitle = chapterTitle.ifEmpty { "Chapter $chapterId" },
-                    onBackClick = { navController.popBackStack() }
+                    onBackClick = { navController.popBackStack() },
+                    onOpenWebView = { url ->
+                        navController.navigate(
+                            "webview?url=${encodeNav(url)}&sourceId=${encodeNav(sourceId)}",
+                        )
+                    },
                 )
             }
         }
