@@ -424,7 +424,14 @@ fun WebtoonApp() {
             
             composable("settings/advanced") {
                 com.radiant.webtoon.ui.settings.AdvancedSettingsScreen(
-                    onBackClick = { navController.popBackStack() }
+                    onBackClick = { navController.popBackStack() },
+                    onPageListDebugClick = { navController.navigate("settings/page_list_debug") },
+                )
+            }
+
+            composable("settings/page_list_debug") {
+                com.radiant.webtoon.ui.settings.PageListDebugScreen(
+                    onBackClick = { navController.popBackStack() },
                 )
             }
 
@@ -471,9 +478,12 @@ fun WebtoonApp() {
                     chapterTitle = chapterTitle.ifEmpty { "Chapter $chapterId" },
                     onBackClick = { navController.popBackStack() },
                     onOpenWebView = { url ->
-                        navController.navigate(
-                            "webview?url=${encodeNav(url)}&sourceId=${encodeNav(sourceId)}",
-                        )
+                        eu.kanade.tachiyomi.network.interceptor.CloudflareInterceptor
+                            .launchVisibleBypass(
+                                context = app,
+                                url = url,
+                                showToast = true,
+                            )
                     },
                 )
             }

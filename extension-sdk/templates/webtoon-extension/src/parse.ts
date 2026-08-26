@@ -18,6 +18,7 @@ import type {
 } from '@radiant/extension-sdk';
 import { absoluteUrl } from './http.js';
 import { extractImageUrlsFromEmbeddedJson } from './embeddedJsonPages.js';
+import { decryptPageListFromScripts, toPageUrls } from './jsPageListDecrypt.js';
 
 // ─── Detail page ─────────────────────────────────────────────────────────────
 
@@ -210,7 +211,22 @@ export function parsePageList(
     return pages;
   }
 
-  return parsePageListFromEmbeddedJson(html, chapterUrl, baseUrl);
+  const embedded = parsePageListFromEmbeddedJson(html, chapterUrl, baseUrl);
+  if (embedded.length > 0) {
+    return embedded;
+  }
+
+  return parsePageListFromObfuscatedJs(html, chapterUrl, baseUrl);
+}
+
+/** Strategy 3: evaluate obfuscated inline JS (QuickJS / vm sandbox) for encrypted payloads. */
+function parsePageListFromObfuscatedJs(
+  html: string,
+  chapterUrl: UrlString,
+  baseUrl: string,
+): PageUrl[] {
+  const urls = decryptPageListFromScripts(html);
+  return toPageUrls(urls, chapterUrl, baseUrl);
 }
 
 /** Strategy 1: `<img>` tags and lazy-load attributes in the reader markup. */

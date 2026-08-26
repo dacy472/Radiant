@@ -10,7 +10,7 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        maven { url = java.net.URI("https://jitpack.io") }
+        maven(url = "https://www.jitpack.io")
     }
 }
 rootProject.name = "WebtoonReader"

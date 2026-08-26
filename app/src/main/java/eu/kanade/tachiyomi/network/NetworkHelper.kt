@@ -1,139 +1,218 @@
 package eu.kanade.tachiyomi.network
 
 import android.content.Context
+import com.radiant.webtoon.core.settings.SettingsManager
 import eu.kanade.tachiyomi.network.interceptor.CloudflareInterceptor
+import eu.kanade.tachiyomi.network.interceptor.ConnectionResetRetryInterceptor
 import eu.kanade.tachiyomi.network.interceptor.FlameComicsJsonRepairInterceptor
 import eu.kanade.tachiyomi.network.interceptor.UncaughtExceptionInterceptor
+import eu.kanade.tachiyomi.network.interceptor.rateLimit
+import kotlin.time.Duration.Companion.seconds
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.flow.first
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
+import eu.kanade.tachiyomi.network.interceptor.limitConcurrentRequestsPerHost
 import okhttp3.Cache
+import okhttp3.CipherSuite
+import okhttp3.ConnectionSpec
+import okhttp3.Dispatcher
 import okhttp3.Dns
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
+import okhttp3.Protocol
 import okhttp3.Response
+import okhttp3.TlsVersion
 import okhttp3.dnsoverhttps.DnsOverHttps
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.logging.HttpLoggingInterceptor
+import java.net.Inet4Address
 import java.net.InetAddress
 import java.util.concurrent.TimeUnit
 
 /**
  * Network helper responsible for providing OkHttpClient instances.
- * Many Tachiyomi/Mihon extensions (like Madara-based ones) depend on this.
+ * Many Tachiyomi/Mihon extensions (like Madara-based ones) depend on this via
+ * `Injekt.get<NetworkHelper>()` (registered in ExtensionCompatModule).
+ *
+ * Interceptor policy:
+ * - [UncaughtExceptionInterceptor], [UserAgentInterceptor] (custom UA, else WebView UA),
+ *   [AndroidCookieJar], [FlameComicsJsonRepairInterceptor], [CloudflareInterceptor],
+ *   then [HttpLoggingInterceptor] HEADERS as the last network interceptor
+ * - Default UA is [android.webkit.WebSettings.getDefaultUserAgent] unless Advanced Settings
+ *   has a custom User-Agent
+ * - Cloudflare DNS-over-HTTPS is the primary resolver (system DNS only if DoH fails)
+ * - OkHttp default protocols (HTTP/2 + HTTP/1.1) — do not force HTTP/1.1
+ * - Stripped / never added: `IgnoreGzipInterceptor`, `BrotliInterceptor`
  */
 class NetworkHelper(context: Context) {
 
-    /**
-     * Shared cookie jar that persists to SharedPreferences.
-     */
-    val cookieJar = AndroidCookieJar(context)
+    private val appContext = context.applicationContext
+    private val settingsManager = SettingsManager(appContext)
+    private val helperScope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
 
     /**
-     * Shared interceptor for updating User-Agent.
+     * Cookie jar synchronized with [android.webkit.CookieManager] so Cloudflare
+     * `cf_clearance` from WebView bypass is visible to OkHttp / extensions.
      */
-    val userAgentInterceptor = UserAgentInterceptor()
+    val cookieJar = AndroidCookieJar(appContext)
 
     /**
-     * Interceptor to bypass Cloudflare blank pages.
+     * Device WebView User-Agent from [android.webkit.WebSettings.getDefaultUserAgent].
      */
-    val cloudflareInterceptor = CloudflareInterceptor(context, cookieJar, userAgentInterceptor)
+    private val webViewUserAgent: String = WebViewUserAgentProvider.getDefault(appContext)
+
+    @Volatile
+    private var customUserAgent: String = ""
 
     /**
-     * Standard client for general requests.
+     * Shared interceptor. Uses Advanced Settings custom UA when set, otherwise [webViewUserAgent].
+     */
+    val userAgentInterceptor = UserAgentInterceptor { resolveUserAgent() }
+
+    init {
+        runCatching {
+            runBlocking(Dispatchers.IO) {
+                customUserAgent = settingsManager.customUserAgent.first()
+            }
+        }
+        userAgentInterceptor.userAgent = resolveUserAgent()
+        helperScope.launch {
+            settingsManager.customUserAgent.collect { value ->
+                customUserAgent = value
+                userAgentInterceptor.userAgent = resolveUserAgent()
+            }
+        }
+    }
+
+    val loggingInterceptor = HttpLoggingInterceptor { message ->
+        android.util.Log.d("OkHttpLogger", message)
+    }.apply {
+        level = HttpLoggingInterceptor.Level.HEADERS
+    }
+
+    val okHttpClient = OkHttpClient.Builder()
+        // ... other interceptors, cookieJar, dns ...
+        .addNetworkInterceptor(loggingInterceptor) // Must be a network interceptor or the last interceptor
+        .build()
+
+    private fun resolveUserAgent(): String =
+        customUserAgent.trim().ifBlank { webViewUserAgent }
+
+    /**
+     * Interceptor to bypass Cloudflare challenge pages (403/503 + challenge HTML).
+     */
+    val cloudflareInterceptor = CloudflareInterceptor(appContext, cookieJar, userAgentInterceptor)
+
+    /**
+     * Standard client for general requests — the singleton OkHttpClient extensions use.
+     *
+     * Deliberately omits IgnoreGzipInterceptor / BrotliInterceptor (Mihon modern networking).
      */
     val client: OkHttpClient by lazy {
-        val logging = HttpLoggingInterceptor().apply {
-            level = HttpLoggingInterceptor.Level.BASIC
-        }
-
-        val cookieInterceptor = Interceptor { chain ->
-            val originalRequest = chain.request()
-            val url = originalRequest.url.toString()
-            // Grab cookies generated by WebView / Cloudflare bypass
-            val cookies = try {
-                android.webkit.CookieManager.getInstance().getCookie(url)
-            } catch (_: Exception) {
-                null
-            }
-
-            val newRequest = if (!cookies.isNullOrEmpty()) {
-                originalRequest.newBuilder()
-                    .header("Cookie", cookies)
-                    .build()
-            } else {
-                originalRequest
-            }
-            chain.proceed(newRequest)
-        }
-
-        // Bootstrap client for DoH lookups (system DNS only)
         val bootstrapClient = OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(10, TimeUnit.SECONDS)
             .build()
 
-        val doh = DnsOverHttps.Builder().client(bootstrapClient)
+        val doh = DnsOverHttps.Builder()
+            .client(bootstrapClient)
             .url("https://cloudflare-dns.com/dns-query".toHttpUrl())
             .bootstrapDnsHosts(
                 InetAddress.getByName("1.1.1.1"),
-                InetAddress.getByName("1.0.0.1")
+                InetAddress.getByName("1.0.0.1"),
             )
             .build()
 
-        // Prefer DoH (helps with VPN DNS hijacking) but fall back to system DNS
-        val dnsWithFallback = object : Dns {
+        // Encrypted DNS first so ISPs cannot poison or RST lookups for blocked manga hosts.
+        // System DNS is only used if Cloudflare DoH itself fails. Prefer IPv4 when both
+        // families exist — emulator IPv6 often connects then gets RST.
+        val dns = object : Dns {
             override fun lookup(hostname: String): List<InetAddress> {
-                return try {
+                val addresses = try {
                     doh.lookup(hostname)
-                } catch (e: Exception) {
+                } catch (_: Exception) {
                     Dns.SYSTEM.lookup(hostname)
                 }
+                val ipv4 = addresses.filterIsInstance<Inet4Address>()
+                return if (ipv4.isNotEmpty()) ipv4 else addresses
             }
         }
 
+        // Cipher-suite alignment with modern Android Chrome — not a full JA3 impersonation
+        // (no GREASE / TLS extensions). Bootstrap DoH client keeps OkHttp default specs.
+        val chromeLikeSpec = ConnectionSpec.Builder(ConnectionSpec.MODERN_TLS)
+            .tlsVersions(TlsVersion.TLS_1_3, TlsVersion.TLS_1_2)
+            .cipherSuites(
+                CipherSuite.TLS_AES_128_GCM_SHA256,
+                CipherSuite.TLS_AES_256_GCM_SHA384,
+                CipherSuite.TLS_CHACHA20_POLY1305_SHA256,
+                CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+                CipherSuite.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
+                CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
+                CipherSuite.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
+                CipherSuite.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
+                CipherSuite.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
+            )
+            .build()
+
         OkHttpClient.Builder()
-            .dns(dnsWithFallback)
+            .dns(dns)
+            .connectionSpecs(listOf(chromeLikeSpec))
+            .dispatcher(
+                Dispatcher().apply {
+                    maxRequests = 16
+                    maxRequestsPerHost = 3
+                }
+            )
+            // OkHttp HTTP/2 fingerprints are RST'd by Cloudflare before any challenge HTML.
+            .protocols(listOf(Protocol.HTTP_1_1))
+            .retryOnConnectionFailure(true)
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
             .writeTimeout(30, TimeUnit.SECONDS)
-            // Cap overall call so orphaned CF/HTTP work cannot run forever.
-            // Cloudflare bypass can take ~25s headless + up to 120s visible before retry.
-            .callTimeout(180, TimeUnit.SECONDS)
+            .callTimeout(4, TimeUnit.MINUTES)
             .cache(
                 Cache(
-                    directory = context.cacheDir.resolve("network_cache"),
+                    directory = appContext.cacheDir.resolve("network_cache"),
                     maxSize = 5L * 1024 * 1024, // 5 MiB — matches Mihon defaults
                 )
             )
-            // Application interceptors run in add order (first added = earliest on outbound requests).
-            // User-Agent + Client Hints must be set before cookies, logging, Cloudflare, and any
-            // extension-specific interceptors appended via client.newBuilder().addInterceptor().
-            .addInterceptor(userAgentInterceptor)
-            // Required by Keiyoushi/Mihon extensions (validates presence at runtime)
-            .addInterceptor(UncaughtExceptionInterceptor())
-            .addInterceptor(cookieInterceptor)
-            .addInterceptor(logging)
-            .addInterceptor(FlameComicsJsonRepairInterceptor())
             .cookieJar(cookieJar)
+            .addNetworkInterceptor(CloudflareCookieInterceptor(cookieJar))
+            .addInterceptor(UncaughtExceptionInterceptor())
+            .addInterceptor(userAgentInterceptor)
+            .addInterceptor(FlameComicsJsonRepairInterceptor())
             .addInterceptor(cloudflareInterceptor)
+            .addInterceptor(ConnectionResetRetryInterceptor())
+            // Pace every host at 3 req/s so chapter CDNs and site HTML cannot burst
+            // Cloudflare's "too many requests" filter. Image Coil client inherits this.
+            .rateLimit(permits = 3, period = 1.seconds)
+            .limitConcurrentRequestsPerHost(3)
+            // Last network interceptor: logs the request that actually goes on the wire
+            // (after application interceptors and CloudflareCookieInterceptor).
+            .addNetworkInterceptor(
+                HttpLoggingInterceptor().apply {
+                    level = HttpLoggingInterceptor.Level.HEADERS
+                }
+            )
             .build()
     }
 
     /**
-     * Specialized client for bypassing Cloudflare or specific anti-bot protections.
+     * Same client as [client]. Mihon deprecated a separate Cloudflare client because
+     * the regular client already runs [CloudflareInterceptor].
      */
-    val cloudflareClient: OkHttpClient by lazy {
-        client.newBuilder()
-            .build()
-    }
+    val cloudflareClient: OkHttpClient by lazy { client }
 
     /**
-     * Matches modern Mihon/Keiyoushi's `NetworkHelper.defaultUserAgentProvider()`. Some
-     * extensions' `headersBuilder()` overrides call this directly instead of hardcoding a
-     * User-Agent string; without it those calls throw NoSuchMethodError/AbstractMethodError.
+     * Custom User-Agent from Advanced Settings, or the device WebView UA when that field is blank.
      */
-    fun defaultUserAgentProvider(): String = userAgentInterceptor.userAgent
+    fun defaultUserAgentProvider(): String = resolveUserAgent()
 }
 
 class SequentialInterceptor : Interceptor {

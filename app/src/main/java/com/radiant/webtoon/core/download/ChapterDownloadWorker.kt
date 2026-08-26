@@ -14,6 +14,7 @@ import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.isActive
+import okhttp3.Headers
 import okhttp3.Request
 import uy.kohesive.injekt.injectLazy
 import java.io.File
@@ -226,19 +227,14 @@ class ChapterDownloadWorker(
         throw lastError ?: Exception("Image download failed")
     }
 
-    private fun headersFor(sourceId: String): Map<String, String> {
-        val source = webtoonRepository.extensionManager.getSource(sourceId) ?: return emptyMap()
-        val headers = source.getWebViewHeaders().toMutableMap()
-        if (headers.keys.none { it.equals("Referer", ignoreCase = true) } && source.baseUrl.isNotBlank()) {
-            headers["Referer"] = source.baseUrl.trimEnd('/') + "/"
-        }
-        return headers
+    private fun headersFor(sourceId: String): Headers {
+        val source = webtoonRepository.extensionManager.getSource(sourceId)
+            ?: return Headers.headersOf()
+        return com.radiant.webtoon.core.image.SourceImageHeaders.from(source)
     }
 
     private fun buildImageRequest(url: String, sourceId: String): Request {
-        val builder = Request.Builder().url(url)
-        headersFor(sourceId).forEach { (key, value) -> builder.addHeader(key, value) }
-        return builder.build()
+        return Request.Builder().url(url).headers(headersFor(sourceId)).build()
     }
 
     private fun updateSpeed(bytes: Long, timeMs: Long) {

@@ -1,9 +1,13 @@
 package com.radiant.webtoon.ui.components
 
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.ExperimentalFoundationApi
+import androidx.compose.foundation.LocalIndication
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -14,6 +18,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -23,6 +28,7 @@ import androidx.compose.ui.unit.sp
 import coil.size.Precision
 import coil.size.Scale
 import com.radiant.webtoon.core.model.Webtoon
+import okhttp3.Headers
 
 /**
  * Resolves the matching installed source's headers (Referer/User-Agent) for a cover image,
@@ -31,18 +37,14 @@ import com.radiant.webtoon.core.model.Webtoon
  * which fails for sites that serve covers from a different CDN host than their `baseUrl`.
  */
 @Composable
-internal fun rememberSourceImageHeaders(sourceId: String?): Map<String, String> {
+internal fun rememberSourceImageHeaders(sourceId: String?): Headers {
     val context = LocalContext.current
     return remember(sourceId) {
-        if (sourceId.isNullOrBlank()) return@remember emptyMap()
+        if (sourceId.isNullOrBlank()) return@remember Headers.headersOf()
         val app = context.applicationContext as? com.radiant.webtoon.WebtoonApplication
-            ?: return@remember emptyMap()
-        val source = app.extensionManager.getSource(sourceId) ?: return@remember emptyMap()
-        val headers = source.getWebViewHeaders().toMutableMap()
-        if (headers.keys.none { it.equals("Referer", ignoreCase = true) } && source.baseUrl.isNotBlank()) {
-            headers["Referer"] = source.baseUrl.trimEnd('/') + "/"
-        }
-        headers
+            ?: return@remember Headers.headersOf()
+        val source = app.extensionManager.getSource(sourceId) ?: return@remember Headers.headersOf()
+        com.radiant.webtoon.core.image.SourceImageHeaders.from(source)
     }
 }
 
@@ -61,27 +63,37 @@ internal fun CoverErrorPlaceholder(modifier: Modifier = Modifier) {
 }
 
 @Composable
-fun UnreadCountBadge(
+fun CoverCountBadge(
     count: Int,
     modifier: Modifier = Modifier,
+    containerColor: Color = Color.Black.copy(alpha = 0.72f),
+    contentColor: Color = Color.White,
 ) {
     if (count <= 0) return
     val label = if (count > 999) "999+" else count.toString()
     Box(
         modifier = modifier
             .clip(RoundedCornerShape(6.dp))
-            .background(Color.Black.copy(alpha = 0.72f))
+            .background(containerColor)
             .padding(horizontal = 6.dp, vertical = 3.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
             text = label,
-            color = Color.White,
+            color = contentColor,
             fontSize = 11.sp,
             fontWeight = FontWeight.SemiBold,
             maxLines = 1,
         )
     }
+}
+
+@Composable
+fun UnreadCountBadge(
+    count: Int,
+    modifier: Modifier = Modifier,
+) {
+    CoverCountBadge(count = count, modifier = modifier)
 }
 
 @OptIn(ExperimentalFoundationApi::class)
@@ -92,24 +104,34 @@ fun WebtoonThumbnailCard(
     onLongClick: (() -> Unit)? = null,
     sourceId: String? = null,
     unreadCount: Int = 0,
+    downloadedCount: Int = 0,
 ) {
     val headers = rememberSourceImageHeaders(sourceId)
+    val interactionSource = remember { MutableInteractionSource() }
+    val pressed by interactionSource.collectIsPressedAsState()
+    val scale by animateFloatAsState(
+        targetValue = if (pressed) 0.96f else 1f,
+        label = "libraryCardScale",
+    )
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .then(
-                if (onLongClick != null) {
-                    Modifier.combinedClickable(onClick = onClick, onLongClick = onLongClick)
-                } else {
-                    Modifier.bounceClick(onClick = onClick)
-                }
+            .graphicsLayer {
+                scaleX = scale
+                scaleY = scale
+            }
+            .combinedClickable(
+                interactionSource = interactionSource,
+                indication = LocalIndication.current,
+                onClick = onClick,
+                onLongClick = onLongClick,
             )
             .padding(4.dp)
     ) {
         Box(
             modifier = Modifier
-                .height(180.dp)
                 .fillMaxWidth()
+                .aspectRatio(2f / 3f)
                 .clip(RoundedCornerShape(8.dp)),
         ) {
             RadiantAsyncImage(
@@ -124,11 +146,33 @@ fun WebtoonThumbnailCard(
                 contentScale = ContentScale.Crop,
                 error = { CoverErrorPlaceholder(Modifier.fillMaxSize()) },
             )
-            UnreadCountBadge(
-                count = unreadCount,
+            if (unreadCount > 0) {
+                Box(
+                    modifier = Modifier
+                        .align(Alignment.TopStart)
+                        .padding(4.dp)
+                        .background(
+                            color = MaterialTheme.colorScheme.primary,
+                            shape = RoundedCornerShape(percent = 50),
+                        )
+                        .padding(horizontal = 8.dp, vertical = 3.dp),
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Text(
+                        text = if (unreadCount > 999) "999+" else unreadCount.toString(),
+                        color = MaterialTheme.colorScheme.onPrimary,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                    )
+                }
+            }
+            CoverCountBadge(
+                count = downloadedCount,
                 modifier = Modifier
-                    .align(Alignment.TopEnd)
+                    .align(Alignment.BottomEnd)
                     .padding(6.dp),
+                containerColor = Color(0xCC2E7D32),
             )
         }
         Text(

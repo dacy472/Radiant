@@ -8,7 +8,7 @@ import android.util.Log
 import com.google.gson.GsonBuilder
 import com.google.gson.JsonDeserializer
 import com.google.gson.annotations.SerializedName
-import dalvik.system.DexClassLoader
+import dalvik.system.PathClassLoader
 import eu.kanade.tachiyomi.network.NetworkHelper
 import uy.kohesive.injekt.injectLazy
 import eu.kanade.tachiyomi.source.Source as TachiyomiSource
@@ -22,16 +22,17 @@ import java.util.zip.GZIPInputStream
 
 /**
  * Handles:
- * - Fetching repo indexes (JSON) to list available extensions
+ * - Fetching repo indexes (JSON / protobuf) to list available extensions
  * - Downloading APK files from repos
  * - Scanning installed extension APKs via PackageManager
- * - Loading extension classes via DexClassLoader / PathClassLoader
+ * - Loading extension classes via [PathClassLoader] (Mihon-style)
  */
 class ExtensionLoader(private val context: Context) {
 
     private val tag = "ExtensionLoader"
 
     private val networkHelper: NetworkHelper by injectLazy()
+    private val signatureTrust by lazy { ExtensionSignatureTrust(context) }
 
     // Custom Gson to handle cases where Boolean is represented as a Number (0/1) in JSON
     private val gson = GsonBuilder()
@@ -64,7 +65,7 @@ class ExtensionLoader(private val context: Context) {
             return dir
         }
 
-    /** Read-only APK copies for DexClassLoader (Android 14+ rejects writable dex paths). */
+    /** Read-only APK copies for PathClassLoader (Android 14+ rejects writable dex paths). */
     private val readOnlyApkDir: File
         get() {
             val dir = File(context.codeCacheDir, "ext_apk")
@@ -91,12 +92,10 @@ class ExtensionLoader(private val context: Context) {
         }
 
         Log.d(tag, "Fetching repo index from: $url")
-        val userAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
 
         fun fetchBytes(targetUrl: String): ByteArray {
             val request = Request.Builder()
                 .url(targetUrl)
-                .header("User-Agent", userAgent)
                 .build()
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
@@ -251,9 +250,89 @@ class ExtensionLoader(private val context: Context) {
 
     // ─── APK Scanning (PackageManager) ───
 
+    companion object {
+        /** Canonical Tachiyomi / Keiyoushi extension package prefix. */
+        const val TACHIYOMI_EXTENSION_PREFIX = "eu.kanade.tachiyomi.extension"
+    }
+
+    /**
+     * Discover system-installed Tachiyomi extension packages via PackageManager.
+     *
+     * Calls [PackageManager.getInstalledPackages] with [PackageManager.GET_META_DATA],
+     * keeps packages whose name starts with [TACHIYOMI_EXTENSION_PREFIX], and extracts
+     * application label, icon, package name, and version code for each match.
+     *
+     * Packages that fail metadata extraction are skipped (logged) so a bad APK cannot
+     * poison the installed-sources list.
+     */
+    fun discoverSystemExtensionPackages(): List<ExtensionInfo> {
+        val pm = context.packageManager
+        val flags = ExtensionSignatureTrust.packageFlags()
+        val installedPackages = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            pm.getInstalledPackages(
+                PackageManager.PackageInfoFlags.of(flags.toLong()),
+            )
+        } else {
+            @Suppress("DEPRECATION")
+            pm.getInstalledPackages(flags)
+        }
+
+        val extensions = mutableListOf<ExtensionInfo>()
+        for (pkgInfo in installedPackages) {
+            val packageName = pkgInfo.packageName ?: continue
+            if (!packageName.startsWith(TACHIYOMI_EXTENSION_PREFIX)) continue
+
+            try {
+                val signatures = signatureTrust.getSignatures(pkgInfo)
+                val extInfo = (parseExtensionPackage(pm, pkgInfo)
+                    ?: extractBasicExtensionInfo(pm, pkgInfo))
+                    ?.copy(signatureHash = signatures.lastOrNull())
+                if (extInfo != null) {
+                    extensions.add(extInfo)
+                    Log.d(tag, "Discovered system extension: ${extInfo.name} ($packageName)")
+                }
+            } catch (e: Exception) {
+                Log.w(tag, "Metadata extraction failed for $packageName", e)
+            }
+        }
+
+        Log.i(tag, "PackageManager sync found ${extensions.size} extension package(s)")
+        return extensions
+    }
+
+    /**
+     * Fallback when Tachiyomi class metadata is missing: still capture label, icon,
+     * package name, and version so the package can be tracked in Installed Sources.
+     */
+    private fun extractBasicExtensionInfo(pm: PackageManager, pkgInfo: PackageInfo): ExtensionInfo? {
+        val appInfo = pkgInfo.applicationInfo ?: return null
+        val versionCode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P) {
+            pkgInfo.longVersionCode
+        } else {
+            @Suppress("DEPRECATION")
+            pkgInfo.versionCode.toLong()
+        }
+        val icon = try {
+            pm.getApplicationIcon(appInfo)
+        } catch (_: Exception) {
+            null
+        }
+        Log.w(tag, "Package ${pkgInfo.packageName} missing extension class metadata; tracking basic info only")
+        return ExtensionInfo(
+            packageName = pkgInfo.packageName,
+            name = pm.getApplicationLabel(appInfo).toString(),
+            versionName = pkgInfo.versionName ?: "1.0.0",
+            versionCode = versionCode,
+            sourceClassName = "",
+            apkPath = appInfo.sourceDir.orEmpty(),
+            icon = icon,
+        )
+    }
+
     /**
      * Scan all installed packages on the device to find Tachiyomi/Mihon extension APKs.
-     * Uses intent-based discovery (official way) and fallback prefix scanning.
+     * Uses intent-based discovery (official way) and [discoverSystemExtensionPackages] for
+     * prefix-based PackageManager scanning.
      */
     fun scanInstalledExtensions(): List<ExtensionInfo> {
         val pm = context.packageManager
@@ -292,27 +371,31 @@ class ExtensionLoader(private val context: Context) {
             }
         }
 
-        // 2. Fallback: Scan packages with specific prefixes (useful for dev or manual installs)
+        // 2. Prefix scan via getInstalledPackages (covers manual / sideloaded installs)
+        for (extInfo in discoverSystemExtensionPackages()) {
+            if (seenPackages.add(extInfo.packageName)) {
+                extensions.add(extInfo)
+                Log.i(tag, "MATCHED prefix extension: ${extInfo.name} (${extInfo.packageName})")
+            }
+        }
+
+        // Also pick up non-Tachiyomi prefixes (mihon / legacy) not covered by discover*
         val installedPackages = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             pm.getInstalledPackages(PackageManager.PackageInfoFlags.of(PackageManager.GET_META_DATA.toLong()))
         } else {
             @Suppress("DEPRECATION")
             pm.getInstalledPackages(PackageManager.GET_META_DATA)
         }
-
         for (pkgInfo in installedPackages) {
             val packageName = pkgInfo.packageName ?: continue
             if (seenPackages.contains(packageName)) continue
+            if (packageName.startsWith(TACHIYOMI_EXTENSION_PREFIX)) continue
             if (extensionPrefixes.none { packageName.startsWith(it) }) continue
-
-            Log.d(tag, "Checking prefix extension: $packageName")
             try {
-                val extInfo = parseExtensionPackage(pm, pkgInfo)
-                if (extInfo != null) {
-                    extensions.add(extInfo)
-                    seenPackages.add(packageName)
-                    Log.i(tag, "MATCHED prefix extension: ${extInfo.name} ($packageName)")
-                }
+                val extInfo = parseExtensionPackage(pm, pkgInfo) ?: continue
+                extensions.add(extInfo)
+                seenPackages.add(packageName)
+                Log.i(tag, "MATCHED alt-prefix extension: ${extInfo.name} ($packageName)")
             } catch (e: Exception) {
                 Log.e(tag, "Error parsing prefix extension $packageName", e)
             }
@@ -355,6 +438,27 @@ class ExtensionLoader(private val context: Context) {
             }
         }
         return extensions.distinctBy { it.packageName }
+    }
+
+    /**
+     * True when [packageName] is installed as a real Android package (PackageManager),
+     * not merely a private APK under the app's files directory.
+     */
+    fun isPackageInstalled(packageName: String): Boolean {
+        return try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+                context.packageManager.getPackageInfo(
+                    packageName,
+                    PackageManager.PackageInfoFlags.of(0),
+                )
+            } else {
+                @Suppress("DEPRECATION")
+                context.packageManager.getPackageInfo(packageName, 0)
+            }
+            true
+        } catch (_: PackageManager.NameNotFoundException) {
+            false
+        }
     }
 
     /**
@@ -425,7 +529,7 @@ class ExtensionLoader(private val context: Context) {
     /**
      * Android 14+ (targetSdk 34+) forbids loading DEX from a writable path.
      * System-installed APKs are already non-writable; local copies under filesDir are not.
-     * Sync a read-only copy into codeCacheDir and return that path for DexClassLoader.
+     * Sync a read-only copy into codeCacheDir and return that path for [PathClassLoader].
      */
     private fun prepareReadOnlyDexPath(apkPath: String, packageName: String): String {
         val source = File(apkPath)
@@ -509,8 +613,83 @@ class ExtensionLoader(private val context: Context) {
     // ─── APK Class Loading ───
 
     /**
+     * Mihon-style entry point: discover system packages prefixed with
+     * [TACHIYOMI_EXTENSION_PREFIX], load each APK via [PathClassLoader], reflectively
+     * instantiate Source / SourceFactory classes, and return active Tachiyomi sources.
+     *
+     * Private (app-local) APKs under [extensionsDir] are also loaded so PackageManager
+     * installs and in-app downloads share one source list.
+     */
+    fun loadExtensions(appContext: Context = context): List<TachiyomiSource> {
+        val pm = appContext.packageManager
+        val flags = ExtensionSignatureTrust.packageFlags()
+        val installedPackages = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            pm.getInstalledPackages(PackageManager.PackageInfoFlags.of(flags.toLong()))
+        } else {
+            @Suppress("DEPRECATION")
+            pm.getInstalledPackages(flags)
+        }
+
+        val sources = mutableListOf<TachiyomiSource>()
+        val loadedPackages = mutableSetOf<String>()
+
+        for (pkgInfo in installedPackages) {
+            val packageName = pkgInfo.packageName ?: continue
+            if (!packageName.startsWith(TACHIYOMI_EXTENSION_PREFIX)) continue
+            val appInfo = pkgInfo.applicationInfo ?: continue
+
+            try {
+                val signatures = signatureTrust.getSignatures(pkgInfo)
+                if (signatures.isEmpty()) {
+                    Log.w(tag, "Skipping unsigned extension package: $packageName")
+                    continue
+                }
+                if (!signatureTrust.isTrusted(pkgInfo, signatures)) {
+                    Log.w(tag, "Skipping untrusted extension package: $packageName (sig=${signatures.last()})")
+                    continue
+                }
+
+                val extInfo = parseExtensionPackage(pm, pkgInfo)?.copy(
+                    signatureHash = signatures.lastOrNull(),
+                ) ?: continue
+                if (extInfo.sourceClassName.isBlank()) continue
+
+                val loaded = instantiateSources(
+                    extInfo = extInfo,
+                    apkPath = appInfo.sourceDir ?: extInfo.apkPath,
+                )
+                sources.addAll(loaded)
+                loadedPackages.add(packageName)
+                Log.i(tag, "loadExtensions: $packageName → ${loaded.size} source(s)")
+            } catch (e: Exception) {
+                Log.e(tag, "loadExtensions failed for $packageName", e)
+            }
+        }
+
+        // Private copies (filesDir/extensions) — do not break existing download path
+        for (localInfo in scanLocalExtensions()) {
+            if (localInfo.packageName in loadedPackages) continue
+            if (!localInfo.packageName.startsWith(TACHIYOMI_EXTENSION_PREFIX) &&
+                extensionPrefixes.none { localInfo.packageName.startsWith(it) }
+            ) {
+                continue
+            }
+            try {
+                val loaded = loadExtensionSources(localInfo)
+                sources.addAll(loaded)
+                loadedPackages.add(localInfo.packageName)
+            } catch (e: Exception) {
+                Log.e(tag, "loadExtensions local failed for ${localInfo.packageName}", e)
+            }
+        }
+
+        Log.i(tag, "loadExtensions complete: ${sources.size} source(s) from ${loadedPackages.size} package(s)")
+        return sources
+    }
+
+    /**
      * Load the Source classes from an installed extension APK.
-     * Returns a list of CatalogueSource instances.
+     * Uses [PathClassLoader] (Mihon-style) against a read-only APK path.
      */
     fun loadExtensionSources(extInfo: ExtensionInfo): List<TachiyomiSource> {
         if (extInfo.libCompatibility == ExtensionLibCompatibility.TooNew) {
@@ -519,33 +698,30 @@ class ExtensionLoader(private val context: Context) {
                     "Radiant supports ${ExtensionLibCompat.SUPPORTED_VERSION}. Please update the app.",
             )
         }
+        if (extInfo.sourceClassName.isBlank()) {
+            Log.w(tag, "No source class metadata for ${extInfo.packageName}")
+            return emptyList()
+        }
         val isLocal = extInfo.apkPath.startsWith(context.filesDir.absolutePath)
         Log.d(tag, "Loading APK: ${extInfo.apkPath} exists=${File(extInfo.apkPath).exists()} local=$isLocal")
+        return instantiateSources(extInfo, extInfo.apkPath)
+    }
 
-        // Always use DexClassLoader with a retained instance so loaded Sources stay valid.
-        // Local APKs under filesDir are writable — Android 14+ rejects those as dex paths.
+    private fun instantiateSources(extInfo: ExtensionInfo, apkPath: String): List<TachiyomiSource> {
+        // PathClassLoader on a non-writable path (system APK or read-only codeCache copy).
         val classLoader = classLoaders.getOrPut(extInfo.packageName) {
-            val dexPath = prepareReadOnlyDexPath(extInfo.apkPath, extInfo.packageName)
-            val optimizedDir = File(context.codeCacheDir, "ext_${extInfo.packageName}").apply {
-                if (!exists()) mkdirs()
-            }
-            Log.d(tag, "DexClassLoader path for ${extInfo.packageName}: $dexPath")
-            DexClassLoader(
-                dexPath,
-                optimizedDir.absolutePath,
-                null,
-                this::class.java.classLoader
-            )
+            val dexPath = prepareReadOnlyDexPath(apkPath, extInfo.packageName)
+            Log.d(tag, "PathClassLoader path for ${extInfo.packageName}: $dexPath")
+            PathClassLoader(dexPath, this::class.java.classLoader)
         }
 
         val sources = mutableListOf<TachiyomiSource>()
-
-        // The source class names may be comma-separated
-        val classNames = extInfo.sourceClassName.split(";").map { it.trim() }.filter { it.isNotEmpty() }
+        val classNames = extInfo.sourceClassName.split(";", ",")
+            .map { it.trim() }
+            .filter { it.isNotEmpty() }
 
         for (className in classNames) {
             try {
-                // If the class name doesn't contain a package, prepend a default
                 val fullClassName = if (className.startsWith(".")) {
                     extInfo.packageName + className
                 } else {
@@ -555,31 +731,27 @@ class ExtensionLoader(private val context: Context) {
                 Log.d(tag, "Instantiating class: $fullClassName")
                 val clazz = Class.forName(fullClassName, false, classLoader)
 
-                // Check if it's a Kotlin object (has INSTANCE field)
                 val instance = try {
                     val instanceField = clazz.getDeclaredField("INSTANCE")
                     instanceField.isAccessible = true
                     instanceField.get(null)
-                } catch (e: Exception) {
+                } catch (_: Exception) {
                     try {
                         clazz.getDeclaredConstructor().newInstance()
                     } catch (e2: Exception) {
-                        Log.e(tag, "Failed to instantiate class: $fullClassName. No public constructor or INSTANCE found.", e2)
+                        Log.e(tag, "Failed to instantiate class: $fullClassName", e2)
                         continue
                     }
                 }
 
-                // Check if it's a SourceFactory (returns multiple sources)
                 val isSourceFactory = try {
-                    // Check by method name to avoid ClassLoader mismatch with the interface
                     clazz.methods.any { it.name == "createSources" }
-                } catch (e: Exception) {
+                } catch (_: Exception) {
                     false
                 }
 
                 if (instance is TachiyomiSource || isSourceByName(clazz)) {
-                    Log.d(tag, "Class $fullClassName identifies as a Source")
-                    val source = instance as? TachiyomiSource ?: instance as? eu.kanade.tachiyomi.source.Source
+                    val source = instance as? TachiyomiSource
                     if (source != null) {
                         Log.d(tag, "Loaded Source: ${source.name}")
                         sources.add(source)
@@ -596,12 +768,9 @@ class ExtensionLoader(private val context: Context) {
                             }
 
                             if (factorySources.isEmpty() && rawSources is List<*>) {
-                                // Fallback: try to add them if they look like sources even if cast fails
                                 for (item in rawSources) {
                                     if (item != null && isSourceByName(item.javaClass)) {
-                                        (item as? TachiyomiSource)?.let {
-                                            sources.add(it)
-                                        }
+                                        (item as? TachiyomiSource)?.let { sources.add(it) }
                                     }
                                 }
                             } else {
@@ -615,13 +784,30 @@ class ExtensionLoader(private val context: Context) {
                         Log.e(tag, "Failed to invoke createSources on $fullClassName", e)
                     }
                 } else {
-                    Log.w(tag, "Class $fullClassName does NOT appear to be a Source or SourceFactory. Interfaces: ${clazz.interfaces.joinToString { it.name }}")
+                    Log.w(
+                        tag,
+                        "Class $fullClassName is not a Source/SourceFactory. " +
+                            "Interfaces: ${clazz.interfaces.joinToString { it.name }}",
+                    )
                 }
             } catch (e: Exception) {
                 Log.e(tag, "Unexpected error loading source class $className", e)
             }
         }
         return sources
+    }
+
+    /** SHA-256 signature hashes for a package, or empty if unsigned / unreadable. */
+    fun getPackageSignatures(pkgInfo: PackageInfo): List<String> =
+        signatureTrust.getSignatures(pkgInfo)
+
+    fun isPackageSignatureTrusted(pkgInfo: PackageInfo): Boolean {
+        val signatures = signatureTrust.getSignatures(pkgInfo)
+        return signatureTrust.isTrusted(pkgInfo, signatures)
+    }
+
+    fun trustPackageSignature(packageName: String, versionCode: Long, signatureHash: String) {
+        signatureTrust.trust(packageName, versionCode, signatureHash)
     }
 
     private fun isSourceByName(clazz: Class<*>): Boolean {
@@ -645,6 +831,8 @@ data class ExtensionInfo(
     val icon: android.graphics.drawable.Drawable? = null,
     val extensionLibVersion: String? = null,
     val libCompatibility: ExtensionLibCompatibility = ExtensionLibCompatibility.Compatible,
+    /** SHA-256 of the APK signing cert when known (Mihon-style trust). */
+    val signatureHash: String? = null,
 )
 
 data class RepoIndex(

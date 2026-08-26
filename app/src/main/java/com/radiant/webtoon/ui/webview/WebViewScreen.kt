@@ -40,6 +40,10 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
+import eu.kanade.tachiyomi.network.NetworkHelper
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
+import uy.kohesive.injekt.Injekt
+import uy.kohesive.injekt.api.get
 
 @SuppressLint("SetJavaScriptEnabled")
 @OptIn(ExperimentalMaterial3Api::class)
@@ -53,7 +57,29 @@ fun WebViewScreen(
     var pageError by remember { mutableStateOf<String?>(null) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var loadedUrl by remember { mutableStateOf<String?>(null) }
-    val headerMap = remember(headers) { HashMap(headers) }
+    val networkHelper = remember { Injekt.get<NetworkHelper>() }
+    val headerMap = remember(url, headers) {
+        HashMap<String, String>(headers.size + 2).apply {
+            headers.forEach { (key, value) ->
+                if (value.isNotBlank() && !key.equals("X-Radiant-Source-Id", ignoreCase = true)) {
+                    put(key, value)
+                }
+            }
+            if (keys.none { it.equals("User-Agent", ignoreCase = true) }) {
+                val ua = networkHelper.userAgentInterceptor.userAgent
+                    .ifBlank { networkHelper.defaultUserAgentProvider() }
+                if (ua.isNotBlank()) put("User-Agent", ua)
+            }
+            if (keys.none { it.equals("Referer", ignoreCase = true) }) {
+                val origin = url.toHttpUrlOrNull()?.let { httpUrl ->
+                    val defaultPort = if (httpUrl.scheme == "https") 443 else 80
+                    val port = if (httpUrl.port != defaultPort) ":${httpUrl.port}" else ""
+                    "${httpUrl.scheme}://${httpUrl.host}$port/"
+                }.orEmpty()
+                if (origin.isNotBlank()) put("Referer", origin)
+            }
+        }
+    }
 
     DisposableEffect(Unit) {
         onDispose {
@@ -132,6 +158,11 @@ fun WebViewScreen(
 
                             override fun onPageFinished(view: WebView?, url: String?) {
                                 isLoading = false
+                                url?.toHttpUrlOrNull()?.let { httpUrl ->
+                                    runCatching {
+                                        Injekt.get<NetworkHelper>().cookieJar.syncFromWebView(httpUrl)
+                                    }
+                                }
                             }
 
                             override fun onReceivedError(
@@ -155,6 +186,7 @@ fun WebViewScreen(
                             javaScriptEnabled = true
                             domStorageEnabled = true
                             databaseEnabled = true
+                            useWideViewPort = true
                             loadsImagesAutomatically = true
                             mixedContentMode = WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE
                             cacheMode = WebSettings.LOAD_DEFAULT

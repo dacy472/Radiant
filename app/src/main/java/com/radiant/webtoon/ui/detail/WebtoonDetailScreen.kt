@@ -3,6 +3,7 @@ package com.radiant.webtoon.ui.detail
 import android.content.Intent
 import android.widget.Toast
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
@@ -15,10 +16,15 @@ import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.gestures.detectTransformGestures
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
@@ -26,30 +32,40 @@ import androidx.compose.material3.*
 import androidx.compose.material3.pulltorefresh.PullToRefreshContainer
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.*
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.blur
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.draw.shadow
+import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.nestedscroll.nestedScroll
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
+import androidx.compose.ui.window.Dialog
+import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.compose.AsyncImage
 import coil.compose.SubcomposeAsyncImage
 import coil.compose.SubcomposeAsyncImageContent
 import coil.request.ImageRequest
-import com.radiant.webtoon.core.model.Chapter
+import com.radiant.webtoon.core.database.Chapter
 import com.radiant.webtoon.core.model.Webtoon
+import com.radiant.webtoon.core.util.ChapterDates
 import com.radiant.webtoon.core.repository.WebtoonRepository
 import com.radiant.webtoon.ui.components.CoverErrorPlaceholder
+import com.radiant.webtoon.ui.components.RadiantAsyncImage
 import com.radiant.webtoon.ui.components.SpringAlertDialog
 import com.radiant.webtoon.ui.components.animatedListRow
 import com.radiant.webtoon.ui.components.listItemRippleCombinedClickable
@@ -116,6 +132,8 @@ fun WebtoonDetailScreen(
         exitSelectionMode()
     }
 
+    // Bind navigation args so the ViewModel observes Room for this title.
+    // Must not call refreshFromNetwork() here — network refresh is user-initiated only.
     LaunchedEffect(sourceId, webtoonId) {
         viewModel.loadWebtoon(sourceId, webtoonId)
     }
@@ -126,12 +144,22 @@ fun WebtoonDetailScreen(
         }
     }
 
-    // Pull-to-refresh state
+    // PullToRefreshBox is not in Compose BOM 2024.02.01; PullToRefreshContainer is.
     val pullToRefreshState = rememberPullToRefreshState()
+    val listState = rememberLazyListState()
+    val headerParallaxY by remember {
+        derivedStateOf {
+            if (listState.firstVisibleItemIndex == 0) {
+                listState.firstVisibleItemScrollOffset * 0.5f
+            } else {
+                0f
+            }
+        }
+    }
 
     if (pullToRefreshState.isRefreshing && !selectionMode) {
         LaunchedEffect(true) {
-            viewModel.refreshWebtoon()
+            viewModel.refreshFromNetwork()
         }
     }
 
@@ -253,12 +281,19 @@ fun WebtoonDetailScreen(
                 CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
             } else {
                 LazyColumn(
+                    state = listState,
                     modifier = Modifier
                         .fillMaxSize()
                         .padding(bottom = paddingValues.calculateBottomPadding())
                 ) {
                     item {
-                        WebtoonHeader(webtoon, sourceId, isFavorite, onToggleFavorite = { viewModel.toggleFavorite() })
+                        WebtoonHeader(
+                            webtoon,
+                            sourceId,
+                            isFavorite,
+                            parallaxY = headerParallaxY,
+                            onToggleFavorite = { viewModel.toggleFavorite() },
+                        )
                     }
                     error?.let { message ->
                         if (webtoon == null && chapters.isEmpty()) {
@@ -296,31 +331,31 @@ fun WebtoonDetailScreen(
                             fontWeight = FontWeight.Bold
                         )
                     }
-                    items(chapters, key = { it.id }) { chapter ->
-                        val downloadStatus = viewModel.downloadTasks.collectAsStateWithLifecycle().value[chapter.id]
+                    items(chapters, key = { it.url }) { chapter ->
+                        val downloadStatus = viewModel.downloadTasks.collectAsStateWithLifecycle().value[chapter.url]
                         ChapterListItem(
                             modifier = Modifier.animatedListRow(),
                             chapter = chapter,
                             status = downloadStatus,
                             selectionMode = selectionMode,
-                            selected = selectedChapterIds.contains(chapter.id),
+                            selected = selectedChapterIds.contains(chapter.url),
                             onClick = {
                                 if (selectionMode) {
-                                    toggleSelection(chapter.id)
+                                    toggleSelection(chapter.url)
                                 } else {
-                                    onChapterClick(chapter.id, chapter.title)
+                                    onChapterClick(chapter.url, chapter.name)
                                 }
                             },
-                            onLongClick = { onChapterLongPress(chapter.id) },
+                            onLongClick = { onChapterLongPress(chapter.url) },
                             onDownloadClick = {
                                 when {
                                     downloadStatus == com.radiant.webtoon.core.database.DownloadStatus.COMPLETED -> {
-                                        pendingDeleteChapterId = chapter.id
+                                        pendingDeleteChapterId = chapter.url
                                     }
                                     downloadStatus == null || downloadStatus == com.radiant.webtoon.core.database.DownloadStatus.FAILED -> {
                                         // Use the in-app queue (per-page JPG folders) so the reader can open offline
-                                        viewModel.downloadChapter(context, chapter.id, chapter.title)
-                                        Toast.makeText(context, "Download queued: ${chapter.title}", Toast.LENGTH_SHORT).show()
+                                        viewModel.downloadChapter(context, chapter.url, chapter.name)
+                                        Toast.makeText(context, "Download queued: ${chapter.name}", Toast.LENGTH_SHORT).show()
                                     }
                                 }
                             }
@@ -329,7 +364,6 @@ fun WebtoonDetailScreen(
                 }
             }
 
-            // Pull-to-refresh indicator
             if (!selectionMode) {
                 PullToRefreshContainer(
                     modifier = Modifier.align(Alignment.TopCenter),
@@ -349,7 +383,7 @@ fun WebtoonDetailScreen(
     }
 
     pendingDeleteChapterId?.let { chapterId ->
-        val chapterTitle = chapters.find { it.id == chapterId }?.title ?: "this chapter"
+        val chapterTitle = chapters.find { it.url == chapterId }?.name ?: "this chapter"
         SpringAlertDialog(
             onDismissRequest = { pendingDeleteChapterId = null },
             title = { Text("Delete download?") },
@@ -388,22 +422,31 @@ fun WebtoonDetailScreen(
 }
 
 @Composable
-fun WebtoonHeader(webtoon: Webtoon?, sourceId: String, isFavorite: Boolean, onToggleFavorite: () -> Unit) {
+fun WebtoonHeader(
+    webtoon: Webtoon?,
+    sourceId: String,
+    isFavorite: Boolean,
+    parallaxY: Float = 0f,
+    onToggleFavorite: () -> Unit,
+) {
     val context = LocalContext.current
     val coverHeaders = rememberSourceImageHeaders(sourceId)
-    Box(modifier = Modifier.fillMaxWidth()) {
+    var showFullCover by remember { mutableStateOf(false) }
+    val coverUrl = webtoon?.thumbnail.orEmpty()
+    Box(modifier = Modifier.fillMaxWidth().clipToBounds()) {
         AsyncImage(
             model = ImageRequest.Builder(context)
                 .data(webtoon?.thumbnail)
-                .apply { coverHeaders.forEach { (key, value) -> addHeader(key, value) } }
+                .headers(coverHeaders)
                 .crossfade(true)
                 .build(),
             contentDescription = null,
             modifier = Modifier
                 .matchParentSize()
-                .blur(16.dp),
+                .graphicsLayer { translationY = parallaxY }
+                .blur(24.dp)
+                .alpha(0.35f),
             contentScale = ContentScale.Crop,
-            alpha = 0.6f
         )
         Box(
             modifier = Modifier
@@ -418,25 +461,31 @@ fun WebtoonHeader(webtoon: Webtoon?, sourceId: String, isFavorite: Boolean, onTo
         Row(
             modifier = Modifier
                 .padding(top = 88.dp, start = 16.dp, end = 16.dp, bottom = 16.dp)
-                .fillMaxWidth()
+                .fillMaxWidth(),
+            verticalAlignment = Alignment.Top,
         ) {
             SubcomposeAsyncImage(
                 model = ImageRequest.Builder(context)
                     .data(webtoon?.thumbnail)
-                    .apply { coverHeaders.forEach { (key, value) -> addHeader(key, value) } }
+                    .headers(coverHeaders)
                     .crossfade(true)
                     .build(),
-                contentDescription = null,
+                contentDescription = "Cover",
                 modifier = Modifier
                     .width(110.dp)
                     .height(160.dp)
                     .shadow(8.dp, RoundedCornerShape(8.dp), clip = true)
-                    .clip(RoundedCornerShape(8.dp)),
+                    .clip(RoundedCornerShape(8.dp))
+                    .clickable(enabled = coverUrl.isNotBlank()) { showFullCover = true },
                 contentScale = ContentScale.Crop,
                 error = { CoverErrorPlaceholder(Modifier.fillMaxSize()) },
                 success = { SubcomposeAsyncImageContent() }
             )
-        Column(modifier = Modifier.padding(start = 16.dp)) {
+            Column(
+                modifier = Modifier
+                    .padding(start = 16.dp)
+                    .weight(1f),
+            ) {
             Text(
                 text = webtoon?.title ?: if (webtoon == null) "Loading..." else "Unknown title",
                 style = MaterialTheme.typography.titleLarge,
@@ -510,6 +559,96 @@ fun WebtoonHeader(webtoon: Webtoon?, sourceId: String, isFavorite: Boolean, onTo
         }
     }
     }
+
+    if (showFullCover && coverUrl.isNotBlank()) {
+        CoverViewerDialog(
+            coverUrl = coverUrl,
+            headers = coverHeaders,
+            onDismiss = { showFullCover = false },
+        )
+    }
+}
+
+@Composable
+private fun CoverViewerDialog(
+    coverUrl: String,
+    headers: okhttp3.Headers,
+    onDismiss: () -> Unit,
+) {
+    var scale by remember { mutableFloatStateOf(1f) }
+    var offset by remember { mutableStateOf(Offset.Zero) }
+
+    Dialog(
+        onDismissRequest = onDismiss,
+        properties = DialogProperties(
+            usePlatformDefaultWidth = false,
+            dismissOnBackPress = true,
+            dismissOnClickOutside = true,
+        ),
+    ) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(Color.Black.copy(alpha = 0.85f))
+                .clickable(onClick = onDismiss),
+        ) {
+            RadiantAsyncImage(
+                url = coverUrl,
+                contentDescription = "Cover",
+                modifier = Modifier
+                    .fillMaxSize()
+                    .clickable(
+                        indication = null,
+                        interactionSource = remember { MutableInteractionSource() },
+                        onClick = {},
+                    )
+                    .pointerInput(Unit) {
+                        detectTapGestures(
+                            onDoubleTap = {
+                                if (scale > 1.1f) {
+                                    scale = 1f
+                                    offset = Offset.Zero
+                                } else {
+                                    scale = 2.5f
+                                }
+                            },
+                        )
+                    }
+                    .pointerInput(Unit) {
+                        detectTransformGestures { _, pan, zoom, _ ->
+                            scale = (scale * zoom).coerceIn(1f, 5f)
+                            if (scale > 1f) {
+                                offset += pan
+                            } else {
+                                offset = Offset.Zero
+                            }
+                        }
+                    }
+                    .graphicsLayer {
+                        scaleX = scale
+                        scaleY = scale
+                        translationX = offset.x
+                        translationY = offset.y
+                    },
+                headers = headers,
+                contentScale = ContentScale.Fit,
+                crossfade = true,
+            )
+            IconButton(
+                onClick = onDismiss,
+                modifier = Modifier
+                    .align(Alignment.TopEnd)
+                    .statusBarsPadding()
+                    .padding(8.dp),
+            ) {
+                Icon(
+                    Icons.Default.Close,
+                    contentDescription = "Close",
+                    tint = Color.White,
+                )
+            }
+        }
+    }
 }
 
 @Composable
@@ -568,33 +707,35 @@ fun ActionButton(
 @Composable
 fun WebtoonDescription(description: String?) {
     var expanded by remember { mutableStateOf(false) }
-    Column(modifier = Modifier.padding(16.dp).clickable { expanded = !expanded }) {
-        Box {
-            Text(
-                text = description ?: "No description available",
-                style = MaterialTheme.typography.bodyMedium,
-                maxLines = if (expanded) Int.MAX_VALUE else 3,
-                overflow = TextOverflow.Ellipsis
-            )
-            if (!expanded && !description.isNullOrEmpty()) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .height(30.dp)
-                        .align(Alignment.BottomCenter)
-                        .background(
-                            Brush.verticalGradient(
-                                colors = listOf(Color.Transparent, MaterialTheme.colorScheme.background)
-                            )
-                        )
-                )
-            }
-        }
-        Icon(
-            if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
-            contentDescription = null,
-            modifier = Modifier.align(Alignment.CenterHorizontally)
+    val body = description?.takeIf { it.isNotBlank() } ?: "No description available"
+    Column(
+        modifier = Modifier
+            .padding(16.dp)
+            .animateContentSize(),
+    ) {
+        Text(
+            text = "Synopsis",
+            style = MaterialTheme.typography.titleSmall,
+            fontWeight = FontWeight.SemiBold,
         )
+        Spacer(modifier = Modifier.height(8.dp))
+        Text(
+            text = body,
+            style = MaterialTheme.typography.bodyMedium,
+            maxLines = if (expanded) Int.MAX_VALUE else 3,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (!description.isNullOrBlank()) {
+            Text(
+                text = if (expanded) "Less" else "More",
+                style = MaterialTheme.typography.labelLarge,
+                color = MaterialTheme.colorScheme.primary,
+                fontWeight = FontWeight.Medium,
+                modifier = Modifier
+                    .padding(top = 4.dp)
+                    .clickable { expanded = !expanded },
+            )
+        }
     }
 }
 
@@ -664,11 +805,9 @@ fun ChapterListItem(
         animationSpec = tween(200),
         label = "chapterRowColor",
     )
-    val titleColor = if (chapter.read && !selected) {
-        MaterialTheme.colorScheme.onSurfaceVariant
-    } else {
-        MaterialTheme.colorScheme.onSurface
-    }
+    val textAlpha = if (chapter.read) 0.38f else 1.0f
+    val textColor = MaterialTheme.colorScheme.onSurface.copy(alpha = textAlpha)
+    val titleWeight = if (chapter.read) FontWeight.Normal else FontWeight.Bold
 
     ListItem(
         modifier = modifier
@@ -689,17 +828,31 @@ fun ChapterListItem(
             }
         },
         headlineContent = {
-            Text(
-                text = chapter.title,
-                color = titleColor,
-                fontWeight = if (selected) FontWeight.SemiBold else FontWeight.Normal,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (!chapter.read) {
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(MaterialTheme.colorScheme.primary),
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                }
+                Text(
+                    text = chapter.name,
+                    color = textColor,
+                    fontWeight = titleWeight,
+                )
+            }
         },
         supportingContent = {
-            Text(
-                text = chapter.date ?: "Yesterday",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
+            val date = ChapterDates.formatExact(chapter.date_upload)
+            if (!date.isNullOrBlank()) {
+                Text(
+                    text = date,
+                    color = textColor,
+                )
+            }
         },
         trailingContent = {
             AnimatedVisibility(

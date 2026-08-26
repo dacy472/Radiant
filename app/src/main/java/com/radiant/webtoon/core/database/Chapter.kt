@@ -34,6 +34,9 @@ interface ChapterDao {
     @Query("SELECT * FROM chapters WHERE manga_id = :mangaId ORDER BY chapter_number DESC")
     fun getChaptersFlow(mangaId: String): Flow<List<Chapter>>
 
+    @Query("SELECT * FROM chapters")
+    fun getAllChaptersFlow(): Flow<List<Chapter>>
+
     @Query("SELECT * FROM chapters WHERE manga_id = :mangaId ORDER BY chapter_number DESC")
     suspend fun getChapters(mangaId: String): List<Chapter>
 

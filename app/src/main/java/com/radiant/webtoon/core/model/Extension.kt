@@ -59,4 +59,24 @@ sealed class Extension {
         val extensionLibVersion: String? = null,
         override val libCompatibility: ExtensionLibCompatibility = ExtensionLibCompatibility.Compatible,
     ) : Extension()
+
+    /**
+     * Installed on-device but blocked until the user trusts its signing certificate hash
+     * (Mihon-style untrusted gate).
+     */
+    data class Untrusted(
+        override val id: String,
+        override val name: String,
+        override val icon: String? = null,
+        override val version: String? = null,
+        override val nsfw: Boolean = false,
+        val pkgName: String,
+        val versionCode: Long = 0,
+        val signatureHash: String,
+        val extensionLibVersion: String? = null,
+        override val libCompatibility: ExtensionLibCompatibility = ExtensionLibCompatibility.Compatible,
+    ) : Extension() {
+        override val isTrusted: Boolean = false
+        override val isInstalled: Boolean = true
+    }
 }

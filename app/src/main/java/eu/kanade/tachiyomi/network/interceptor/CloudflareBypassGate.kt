@@ -4,14 +4,14 @@ import kotlinx.coroutines.CompletableDeferred
 import java.util.concurrent.atomic.AtomicReference
 
 /**
- * Coordinates a visible [com.radiant.webtoon.ui.extensions.CloudflareBypassActivity]
- * session with a blocking OkHttp interceptor.
+ * Coordinates a visible Cloudflare bottom sheet with a blocking OkHttp interceptor.
  */
 object CloudflareBypassGate {
 
     data class BypassResult(
         val success: Boolean,
         val userAgent: String? = null,
+        val cookies: String? = null,
     )
 
     private val pending = AtomicReference<CompletableDeferred<BypassResult>?>(null)

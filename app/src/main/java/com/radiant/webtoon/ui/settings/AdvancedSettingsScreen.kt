@@ -2,6 +2,8 @@ package com.radiant.webtoon.ui.settings
 
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.*
@@ -16,7 +18,10 @@ import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun AdvancedSettingsScreen(onBackClick: () -> Unit) {
+fun AdvancedSettingsScreen(
+    onBackClick: () -> Unit,
+    onPageListDebugClick: () -> Unit = {},
+) {
     val context = LocalContext.current
     val settingsManager = remember { SettingsManager(context) }
     val scope = rememberCoroutineScope()
@@ -30,6 +35,15 @@ fun AdvancedSettingsScreen(onBackClick: () -> Unit) {
 
     val extensionAdvancedMode by settingsManager.extensionAdvancedMode.collectAsState(initial = false)
     val autoUpdateExtensions by settingsManager.autoUpdateExtensions.collectAsState(initial = true)
+    val pageListDebugMode by settingsManager.pageListDebugMode.collectAsState(initial = false)
+    val storedCustomUserAgent by settingsManager.customUserAgent.collectAsState(initial = "")
+    var customUserAgentInput by remember { mutableStateOf("") }
+    LaunchedEffect(storedCustomUserAgent) {
+        customUserAgentInput = storedCustomUserAgent
+    }
+    val webViewUserAgent = remember {
+        eu.kanade.tachiyomi.network.WebViewUserAgentProvider.getDefault(context)
+    }
     var showAdvancedWarning by remember { mutableStateOf(false) }
 
     Scaffold(
@@ -44,7 +58,12 @@ fun AdvancedSettingsScreen(onBackClick: () -> Unit) {
             )
         }
     ) { paddingValues ->
-        Column(modifier = Modifier.padding(paddingValues).padding(16.dp)) {
+        Column(
+            modifier = Modifier
+                .padding(paddingValues)
+                .padding(16.dp)
+                .verticalScroll(rememberScrollState()),
+        ) {
             // Reading Settings
             Text("Reading", style = MaterialTheme.typography.titleMedium)
             Spacer(modifier = Modifier.height(8.dp))
@@ -139,7 +158,36 @@ fun AdvancedSettingsScreen(onBackClick: () -> Unit) {
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
 
-            // Troubleshooting
+            Text("Network", style = MaterialTheme.typography.titleMedium)
+            Spacer(modifier = Modifier.height(8.dp))
+            Text("Custom User-Agent", style = MaterialTheme.typography.bodyMedium)
+            Text(
+                "Leave blank to use this device's WebView User-Agent (matches Cloudflare bypass).",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedTextField(
+                value = customUserAgentInput,
+                onValueChange = { value ->
+                    customUserAgentInput = value
+                    scope.launch { settingsManager.setCustomUserAgent(value) }
+                },
+                label = { Text("Custom User-Agent") },
+                placeholder = {
+                    Text(
+                        webViewUserAgent,
+                        maxLines = 2,
+                        style = MaterialTheme.typography.bodySmall,
+                    )
+                },
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(top = 8.dp),
+                minLines = 2,
+                maxLines = 4,
+            )
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
             Text("Troubleshooting", style = MaterialTheme.typography.titleMedium)
             var cacheCleared by remember { mutableStateOf(false) }
             Button(
@@ -240,9 +288,41 @@ fun AdvancedSettingsScreen(onBackClick: () -> Unit) {
                         },
                     )
                 }
+
+                Spacer(modifier = Modifier.height(16.dp))
+                HorizontalDivider()
+                Spacer(modifier = Modifier.height(8.dp))
+                Text("Page List Debug", style = MaterialTheme.typography.titleSmall)
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Text("Enable page-list debug", style = MaterialTheme.typography.bodyMedium)
+                        Text(
+                            "Log raw HTTP/parse failures when chapters return zero pages. " +
+                                "Shows a debug overlay in the reader.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Switch(
+                        checked = pageListDebugMode,
+                        onCheckedChange = {
+                            scope.launch { settingsManager.setPageListDebugMode(it) }
+                        },
+                    )
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Button(
+                    onClick = onPageListDebugClick,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text("View page-list debug logs")
+                }
             }
 
-            Spacer(modifier = Modifier.weight(1f))
+            Spacer(modifier = Modifier.height(24.dp))
             Text(
                 text = "Version 2.0.0 (Local Extensions)",
                 style = MaterialTheme.typography.labelSmall,

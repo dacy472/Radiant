@@ -8,6 +8,20 @@
     <uses-permission android:name="android.permission.REQUEST_DELETE_PACKAGES" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
 
+    <!--
+      Android 11+ package visibility: allow discovering Tachiyomi/Keiyoushi extension APKs.
+      QUERY_ALL_PACKAGES covers getInstalledPackages(); the intent query remains as a
+      fallback if the broad permission is stripped (e.g. Play-filtered builds).
+    -->
+    <queries>
+        <intent>
+            <action android:name="eu.kanade.tachiyomi.extension.SOURCE" />
+        </intent>
+        <intent>
+            <action android:name="android.intent.action.MAIN" />
+            <category android:name="android.intent.category.LAUNCHER" />
+        </intent>
+    </queries>
 
     <application
         android:name=".WebtoonApplication"
@@ -55,6 +69,8 @@
         <activity
             android:name=".ui.extensions.CloudflareBypassActivity"
             android:exported="false"
+            android:excludeFromRecents="true"
+            android:theme="@android:style/Theme.Translucent.NoTitleBar"
             android:configChanges="orientation|screenSize" />
 
     </application>

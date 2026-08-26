@@ -15,7 +15,14 @@ import coil.request.ImageRequest
 import coil.size.Dimension
 import coil.size.Precision
 import coil.size.Scale
+import com.radiant.webtoon.core.image.SourceImageHeaders
 import com.radiant.webtoon.core.image.evictFromMemoryCache
+import com.radiant.webtoon.core.image.toOkHttpHeaders
+import eu.kanade.tachiyomi.network.NetworkHelper
+import eu.kanade.tachiyomi.network.WebViewUserAgentProvider
+import okhttp3.Headers
+import uy.kohesive.injekt.Injekt
+import uy.kohesive.injekt.api.get
 
 /**
  * Disk-prioritized Coil image with aggressive in-memory eviction when the composable
@@ -27,6 +34,49 @@ fun RadiantAsyncImage(
     contentDescription: String?,
     modifier: Modifier = Modifier,
     headers: Map<String, String> = emptyMap(),
+    sourceId: String? = null,
+    widthPx: Int? = null,
+    heightPx: Int? = null,
+    widthDp: Int? = null,
+    heightDp: Int? = null,
+    precision: Precision = Precision.INEXACT,
+    scale: Scale = Scale.FIT,
+    contentScale: ContentScale = ContentScale.Crop,
+    allowHardware: Boolean = true,
+    crossfade: Boolean = true,
+    evictFromMemoryOnDispose: Boolean = true,
+    loading: @Composable (() -> Unit)? = null,
+    error: @Composable (() -> Unit)? = null,
+) {
+    RadiantAsyncImage(
+        url = url,
+        contentDescription = contentDescription,
+        modifier = modifier,
+        sourceHeaders = headers.toOkHttpHeaders(),
+        sourceId = sourceId,
+        widthPx = widthPx,
+        heightPx = heightPx,
+        widthDp = widthDp,
+        heightDp = heightDp,
+        precision = precision,
+        scale = scale,
+        contentScale = contentScale,
+        allowHardware = allowHardware,
+        crossfade = crossfade,
+        evictFromMemoryOnDispose = evictFromMemoryOnDispose,
+        loading = loading,
+        error = error,
+    )
+}
+
+@Composable
+fun RadiantAsyncImage(
+    url: String,
+    contentDescription: String?,
+    modifier: Modifier = Modifier,
+    sourceHeaders: Headers? = null,
+    headers: Headers? = sourceHeaders,
+    sourceId: String? = null,
     widthPx: Int? = null,
     heightPx: Int? = null,
     widthDp: Int? = null,
@@ -43,11 +93,27 @@ fun RadiantAsyncImage(
     val context = LocalContext.current
     val imageLoader = context.imageLoader
 
-    val request = remember(url, headers, widthPx, heightPx, widthDp, heightDp, precision, scale, allowHardware, crossfade) {
+    val requestHeaders = sourceHeaders ?: headers
+    val request = remember(url, requestHeaders, sourceId, widthPx, heightPx, widthDp, heightDp, precision, scale, allowHardware, crossfade) {
+        val app = context.applicationContext as? com.radiant.webtoon.WebtoonApplication
+        val source = sourceId?.let { app?.extensionManager?.getSource(it) }
+        val defaultUa = runCatching {
+            Injekt.get<NetworkHelper>().defaultUserAgentProvider()
+        }.getOrNull()?.takeIf { it.isNotBlank() }
+            ?: WebViewUserAgentProvider.getDefault(context)
+        val resolvedHeaders = SourceImageHeaders.resolve(
+            explicit = requestHeaders ?: Headers.headersOf(),
+            source = source,
+            defaultUserAgent = defaultUa,
+        )
         ImageRequest.Builder(context)
             .data(url)
+            .headers(resolvedHeaders)
             .apply {
-                headers.forEach { (key, value) -> addHeader(key, value) }
+                if (!sourceId.isNullOrBlank()) {
+                    tag(com.radiant.webtoon.core.image.ImageSourceId::class.java, com.radiant.webtoon.core.image.ImageSourceId(sourceId))
+                    addHeader(com.radiant.webtoon.core.image.SourceImageHeaders.SOURCE_ID_HEADER, sourceId)
+                }
                 when {
                     widthPx != null || heightPx != null -> {
                         val width = widthPx?.let { Dimension.Pixels(it) } ?: Dimension.Undefined

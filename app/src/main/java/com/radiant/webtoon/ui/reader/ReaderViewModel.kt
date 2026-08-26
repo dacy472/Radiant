@@ -9,6 +9,7 @@ import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
 import com.radiant.webtoon.WebtoonApplication
+import com.radiant.webtoon.core.debug.PageListDebugLogger
 import com.radiant.webtoon.core.model.ChapterPagesResult
 import com.radiant.webtoon.core.repository.WebtoonRepository
 import com.radiant.webtoon.core.database.Chapter
@@ -41,6 +42,12 @@ class ReaderViewModel(
     private val _pageError = MutableStateFlow<ReaderPageError?>(null)
     val pageError: StateFlow<ReaderPageError?> = _pageError
 
+    private val _pageListDebugEvent = MutableStateFlow<PageListDebugLogger.PageListDebugEvent?>(null)
+    val pageListDebugEvent: StateFlow<PageListDebugLogger.PageListDebugEvent?> = _pageListDebugEvent
+
+    private val _pageListDebugMode = MutableStateFlow(false)
+    val pageListDebugMode: StateFlow<Boolean> = _pageListDebugMode
+
     /** HTTP headers from the source (User-Agent, Referer, etc.) for Coil image requests. */
     private val _sourceHeaders = MutableStateFlow(Headers.headersOf())
     val sourceHeaders: StateFlow<Headers> = _sourceHeaders
@@ -62,6 +69,19 @@ class ReaderViewModel(
     private val _previousChapter = MutableStateFlow<Chapter?>(null)
     val previousChapter: StateFlow<Chapter?> = _previousChapter
 
+    private val _hasNextChapter = MutableStateFlow(false)
+    val hasNextChapter: StateFlow<Boolean> = _hasNextChapter
+
+    private val _hasPreviousChapter = MutableStateFlow(false)
+    val hasPreviousChapter: StateFlow<Boolean> = _hasPreviousChapter
+
+    /** Bumped whenever a chapter starts loading so the UI resets scroll/pager to page 1. */
+    private val _resetPositionTick = MutableStateFlow(0)
+    val resetPositionTick: StateFlow<Int> = _resetPositionTick
+
+    private val _activeChapterId = MutableStateFlow("")
+    val activeChapterId: StateFlow<String> = _activeChapterId
+
     private var currentSourceId: String = ""
     private var currentWebtoonId: String = ""
     var currentChapterId: String = ""
@@ -75,6 +95,11 @@ class ReaderViewModel(
                     "rtl" -> 2
                     else -> 0
                 }
+            }
+        }
+        viewModelScope.launch {
+            settingsManager.pageListDebugMode.collect { enabled ->
+                _pageListDebugMode.value = enabled
             }
         }
     }
@@ -128,37 +153,35 @@ class ReaderViewModel(
     }
     // ────────────────────────────────────────────────────────────────────────
 
+    fun loadNextChapter() {
+        val chapter = _nextChapter.value ?: return
+        if (currentSourceId.isBlank() || currentWebtoonId.isBlank()) return
+        loadChapter(currentSourceId, currentWebtoonId, chapter.url, chapter.name)
+    }
+
+    fun loadPreviousChapter() {
+        val chapter = _previousChapter.value ?: return
+        if (currentSourceId.isBlank() || currentWebtoonId.isBlank()) return
+        loadChapter(currentSourceId, currentWebtoonId, chapter.url, chapter.name)
+    }
+
     fun loadChapter(sourceId: String, webtoonId: String, chapterId: String, chapterTitle: String) {
         currentSourceId = sourceId
         currentWebtoonId = webtoonId
         currentChapterId = chapterId
+        _activeChapterId.value = chapterId
+        _resetPositionTick.value = _resetPositionTick.value + 1
         _isLoading.value = true
         _pageError.value = null
+        _pageListDebugEvent.value = null
         
         viewModelScope.launch {
-            // Fetch adjacent chapters to identify "Next"
-            try {
-                val allChapters = repository.chapterDao.getChapters(webtoonId)
-                val currentIndex = allChapters.indexOfFirst { it.url == chapterId }
-                
-                if (currentIndex != -1) {
-                    _nextChapter.value = allChapters.getOrNull(currentIndex - 1)
-                    _previousChapter.value = allChapters.getOrNull(currentIndex + 1)
-                } else {
-                    _nextChapter.value = null
-                    _previousChapter.value = null
-                }
-            } catch (e: Exception) {
-                _nextChapter.value = null
-                _previousChapter.value = null
-            }
+            refreshAdjacentChapters(webtoonId, chapterId)
 
-            // Resolve source headers so Coil can attach them to image requests
+            // Resolve source headers (Referer + User-Agent) so Coil/OkHttp never fetch pages naked.
             val app = getApplication<WebtoonApplication>()
             val source = app.extensionManager.getSource(sourceId)
-            if (source is TachiyomiSourceAdapter) {
-                _sourceHeaders.value = source.httpHeaders
-            }
+            _sourceHeaders.value = com.radiant.webtoon.core.image.SourceImageHeaders.toOkHttpHeaders(source)
             try {
                 // Record history / last-opened progress without marking the chapter fully read
                 repository.updateLastPageRead(chapterId, webtoonId, 0)
@@ -193,13 +216,17 @@ class ReaderViewModel(
                 }
 
                 // Fallback to network
-                val result = repository.getChapterPagesResult(sourceId, chapterId)
+                val result = repository.getChapterPagesResult(sourceId, chapterId, webtoonId)
                 _pages.value = result.pages
                 if (result.pages.isEmpty()) {
+                    _pageListDebugEvent.value = PageListDebugLogger.lastEventForChapter(chapterId)
+                        ?: PageListDebugLogger.lastEvent()
                     _pageError.value = resolvePageError(result, chapterId, source)
                 }
             } catch (e: Exception) {
                 _pages.value = emptyList()
+                _pageListDebugEvent.value = PageListDebugLogger.lastEventForChapter(chapterId)
+                    ?: PageListDebugLogger.lastEvent()
                 val app = getApplication<WebtoonApplication>()
                 val source = app.extensionManager.getSource(sourceId)
                 if (e.message?.contains("cloudflare", ignoreCase = true) == true) {
@@ -212,6 +239,29 @@ class ReaderViewModel(
             }
             _isLoading.value = false
         }
+    }
+
+    /**
+     * Room stores chapters `ORDER BY chapter_number DESC` (highest number first).
+     * Index - 1 is the next chapter; index + 1 is the previous.
+     */
+    private suspend fun refreshAdjacentChapters(webtoonId: String, chapterId: String) {
+        try {
+            val allChapters = repository.getChaptersForManga(webtoonId)
+            val currentIndex = allChapters.indexOfFirst { it.url == chapterId }
+            if (currentIndex != -1) {
+                _nextChapter.value = allChapters.getOrNull(currentIndex - 1)
+                _previousChapter.value = allChapters.getOrNull(currentIndex + 1)
+            } else {
+                _nextChapter.value = null
+                _previousChapter.value = null
+            }
+        } catch (_: Exception) {
+            _nextChapter.value = null
+            _previousChapter.value = null
+        }
+        _hasNextChapter.value = _nextChapter.value != null
+        _hasPreviousChapter.value = _previousChapter.value != null
     }
 
     private fun resolvePageError(

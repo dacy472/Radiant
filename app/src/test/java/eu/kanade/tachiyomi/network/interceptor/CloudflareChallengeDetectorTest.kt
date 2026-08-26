@@ -10,11 +10,22 @@ import org.junit.Test
 class CloudflareChallengeDetectorTest {
 
     @Test
-    fun detects403WithCfRay() {
+    fun ignores403WithCfRayOnly() {
         val response = response(
             code = 403,
-            headers = mapOf("cf-ray" to "abc123"),
+            headers = mapOf("cf-ray" to "abc123", "Server" to "cloudflare"),
             body = "<html></html>",
+        )
+        assertFalse(CloudflareChallengeDetector.isChallengeResponse(response))
+        response.close()
+    }
+
+    @Test
+    fun detects403WithChallengeErrorTitle() {
+        val response = response(
+            code = 403,
+            headers = mapOf("Server" to "cloudflare"),
+            body = "<html><div id=\"challenge-error-title\">Enable JavaScript</div></html>",
         )
         assertTrue(CloudflareChallengeDetector.isChallengeResponse(response))
         response.close()
@@ -47,6 +58,22 @@ class CloudflareChallengeDetectorTest {
         )
         assertFalse(
             CloudflareChallengeDetector.hasClearanceCookie("__cf_bm=xyz"),
+        )
+    }
+
+    @Test
+    fun newClearanceIgnoresStaleCookie() {
+        assertFalse(
+            CloudflareChallengeDetector.hasNewClearance(
+                "cf_clearance=old",
+                previousValue = "old",
+            ),
+        )
+        assertTrue(
+            CloudflareChallengeDetector.hasNewClearance(
+                "cf_clearance=fresh",
+                previousValue = "old",
+            ),
         )
     }
 

@@ -6,7 +6,7 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.pager.HorizontalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.foundation.shape.CircleShape
@@ -197,7 +197,10 @@ fun SourcesTab(extensionManager: ExtensionManager, searchQuery: String, onBrowse
                     )
                 )
             }
-            items(pinnedSources, key = { it.id }) { source ->
+            itemsIndexed(
+                pinnedSources.distinctBy { it.id },
+                key = { index, source -> "${source.id}_$index" }
+            ) { _, source ->
                 SourceListItem(
                     source = source,
                     isPinned = source.isPinned,
@@ -222,7 +225,10 @@ fun SourcesTab(extensionManager: ExtensionManager, searchQuery: String, onBrowse
                     )
                 )
             }
-            items(otherSources, key = { it.id }) { source ->
+            itemsIndexed(
+                otherSources.distinctBy { it.id },
+                key = { index, source -> "${source.id}_$index" }
+            ) { _, source ->
                 SourceListItem(
                     source = source,
                     isPinned = source.isPinned,
@@ -359,7 +365,10 @@ fun MigrateTab(viewModel: BrowseViewModel, onMigrateSourceClick: (String) -> Uni
                 )
             )
         }
-        items(items, key = { it.source.id }) { item ->
+        itemsIndexed(
+            items.distinctBy { it.source.id },
+            key = { index, item -> "${item.source.id}_$index" }
+        ) { _, item ->
             MigrateSourceItem(
                 item = item,
                 onClick = { onMigrateSourceClick(item.source.id) }

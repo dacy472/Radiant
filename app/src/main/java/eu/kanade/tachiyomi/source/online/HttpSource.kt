@@ -1,6 +1,7 @@
 package eu.kanade.tachiyomi.source.online
 
 import eu.kanade.tachiyomi.network.NetworkHelper
+import eu.kanade.tachiyomi.network.UserAgentInterceptor
 import eu.kanade.tachiyomi.source.CatalogueSource
 import eu.kanade.tachiyomi.source.model.*
 import okhttp3.Headers
@@ -57,6 +58,7 @@ abstract class HttpSource : CatalogueSource {
      * Headers builder for requests.
      */
     protected open fun headersBuilder(): Headers.Builder = Headers.Builder().apply {
+        // Device WebView UA — same string OkHttp sends on every request.
         add("User-Agent", network.defaultUserAgentProvider())
     }
 
@@ -177,6 +179,11 @@ abstract class HttpSource : CatalogueSource {
             client.newCall(request).execute().use { response ->
                 val status = response.code
                 val chapterUrl = request.url.toString()
+                val peekedBody = try {
+                    response.peekBody(100_000L).string()
+                } catch (_: Exception) {
+                    null
+                }
                 val challengeHtml = eu.kanade.tachiyomi.network.interceptor.CloudflareChallengeDetector
                     .peekChallengeHtml(response)
                 val statusChallenge = status in eu.kanade.tachiyomi.network.interceptor
@@ -186,9 +193,35 @@ abstract class HttpSource : CatalogueSource {
                             .isChallengeResponse(response) ||
                             challengeHtml
                         )
-                val pages = pageListParse(response)
+                val pages = try {
+                    pageListParse(response)
+                } catch (e: Exception) {
+                    com.radiant.webtoon.core.debug.PageListDebugLogger.logParseFailure(
+                        step = "pageListParse_exception",
+                        error = e,
+                        responseBody = peekedBody,
+                    )
+                    emptyList()
+                }
                 val cloudflareChallenge = statusChallenge ||
                     (pages.isEmpty() && challengeHtml && status != 404)
+                if (pages.isEmpty()) {
+                    com.radiant.webtoon.core.debug.PageListDebugLogger.logEmptyPageList(
+                        step = if (cloudflareChallenge) "empty_after_parse_cloudflare" else "empty_after_parse",
+                        httpStatus = status,
+                        responseBody = peekedBody,
+                        strategy = "HttpSource.pageListParse",
+                        extra = mapOf("pageCount" to "0"),
+                    )
+                } else if (status !in 200..299) {
+                    com.radiant.webtoon.core.debug.PageListDebugLogger.logStep(
+                        step = "non_2xx_with_pages",
+                        httpStatus = status,
+                        responseBody = peekedBody,
+                        strategy = "HttpSource.pageListParse",
+                        extra = mapOf("pageCount" to pages.size.toString()),
+                    )
+                }
                 PageListFetchResult(
                     pages = pages,
                     httpStatus = status,
@@ -198,6 +231,12 @@ abstract class HttpSource : CatalogueSource {
             }
         } catch (e: java.io.IOException) {
             val isCloudflare = e.message?.contains("cloudflare", ignoreCase = true) == true
+            com.radiant.webtoon.core.debug.PageListDebugLogger.logEmptyPageList(
+                step = "fetch_io_exception",
+                httpStatus = if (isCloudflare) 403 else -1,
+                error = e,
+                strategy = "HttpSource.fetchPageListWithMetadata",
+            )
             PageListFetchResult(
                 pages = emptyList(),
                 httpStatus = if (isCloudflare) 403 else -1,
@@ -283,6 +322,7 @@ abstract class HttpSource : CatalogueSource {
     override fun getFilterList(): FilterList = FilterList()
 
     companion object {
-        const val DEFAULT_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        /** Fallback only — prefer [NetworkHelper.defaultUserAgentProvider] (WebView UA) at runtime. */
+        const val DEFAULT_USER_AGENT = UserAgentInterceptor.FALLBACK_USER_AGENT
     }
 }

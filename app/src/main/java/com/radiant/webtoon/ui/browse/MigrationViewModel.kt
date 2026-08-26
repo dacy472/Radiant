@@ -63,7 +63,11 @@ class MigrationViewModel(private val repository: WebtoonRepository) : ViewModel(
                         read = matchingOld != null,
                         bookmark = matchingOld?.bookmark ?: false,
                         last_page_read = matchingOld?.last_page_read ?: 0,
-                        date_fetch = 0L // Set to 0 so migration doesn't flood Updates screen
+                        date_fetch = 0L, // Don't flood Updates with migrated chapters
+                        date_upload = com.radiant.webtoon.core.util.ChapterDates.millisFrom(
+                            rawDate = remote.date,
+                            millis = remote.dateUploadMillis,
+                        ).takeIf { it > 0L } ?: matchingOld?.date_upload ?: 0L,
                     )
                 }
                 

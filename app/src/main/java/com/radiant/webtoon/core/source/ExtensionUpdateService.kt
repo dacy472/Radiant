@@ -29,7 +29,6 @@ class ExtensionUpdateService(
 
         val request = Request.Builder()
             .url(indexUrl)
-            .header("User-Agent", USER_AGENT)
             .header("Accept", "application/json")
             .build()
 
@@ -116,9 +115,6 @@ class ExtensionUpdateService(
     }
 
     companion object {
-        private const val USER_AGENT =
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-
         /** Resolve any repo URL variant to `index.min.json`. */
         fun normalizeIndexMinJsonUrl(repoUrl: String): String {
             val trimmed = repoUrl.trim().trimEnd('/')

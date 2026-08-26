@@ -32,6 +32,7 @@ import com.radiant.webtoon.ui.components.DownloadManagerIconButton
 import com.radiant.webtoon.ui.components.animatedListRow
 import com.radiant.webtoon.ui.components.listItemRippleClickable
 import com.radiant.webtoon.ui.components.rememberSourceImageHeaders
+import com.radiant.webtoon.core.util.ChapterDates
 import java.util.Calendar
 
 @OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
@@ -105,7 +106,7 @@ fun UpdatesScreen(
                     contentPadding = PaddingValues(bottom = 80.dp),
                 ) {
                     groupedUpdates.forEach { group ->
-                        stickyHeader(key = "header-${group.bucket.name}") {
+                        stickyHeader(key = "header-${group.dayStart}") {
                             UpdateSectionHeader(label = group.label)
                         }
 
@@ -191,7 +192,7 @@ fun UpdateItemRow(
         SubcomposeAsyncImage(
             model = ImageRequest.Builder(context)
                 .data(item.webtoonThumbnail)
-                .apply { coverHeaders.forEach { (key, value) -> addHeader(key, value) } }
+                .headers(coverHeaders)
                 .crossfade(true)
                 .build(),
             contentDescription = item.webtoonTitle,
@@ -252,62 +253,44 @@ fun UpdateItemRow(
     }
 }
 
-internal enum class UpdateDateBucket(val label: String, val sortOrder: Int) {
-    TODAY("Today", 0),
-    YESTERDAY("Yesterday", 1),
-    LAST_WEEK("Last Week", 2),
-    OLDER("Older", 3),
-}
-
 /**
- * Groups chapter updates into Today → Yesterday → Last Week → Older buckets
- * (newest first within each section).
+ * Groups chapter updates by calendar day (Mihon-style): Today, Yesterday,
+ * then a specific date such as "August 16, 2026" — newest days first.
  */
-internal fun groupUpdatesByDate(updates: List<UpdateItem>): List<DateUpdateGroup> {
+internal fun groupUpdatesByDate(
+    updates: List<UpdateItem>,
+    nowMillis: Long = System.currentTimeMillis(),
+): List<DateUpdateGroup> {
     if (updates.isEmpty()) return emptyList()
 
-    val todayStart = startOfDay(System.currentTimeMillis())
-    val yesterdayStart = Calendar.getInstance().apply {
-        add(Calendar.DAY_OF_YEAR, -1)
-    }.let { startOfDay(it.timeInMillis) }
-    val lastWeekStart = Calendar.getInstance().apply {
-        add(Calendar.DAY_OF_YEAR, -7)
-    }.let { startOfDay(it.timeInMillis) }
+    val todayStart = startOfDay(nowMillis)
+    val yesterdayStart = startOfDay(todayStart - 1L)
 
     return updates
-        .groupBy { item ->
-            resolveUpdateDateBucket(
-                dayStart = startOfDay(item.chapter.date_fetch),
-                todayStart = todayStart,
-                yesterdayStart = yesterdayStart,
-                lastWeekStart = lastWeekStart,
-            )
-        }
+        .groupBy { item -> startOfDay(item.chapter.date_fetch) }
         .toList()
-        .sortedBy { (bucket, _) -> bucket.sortOrder }
-        .map { (bucket, bucketItems) ->
+        .sortedByDescending { (dayStart, _) -> dayStart }
+        .map { (dayStart, dayItems) ->
             DateUpdateGroup(
-                bucket = bucket,
-                label = bucket.label,
-                items = bucketItems.sortedByDescending { it.chapter.date_fetch },
+                dayStart = dayStart,
+                label = formatUpdateDayLabel(dayStart, todayStart, yesterdayStart),
+                items = dayItems.sortedByDescending { it.chapter.date_fetch },
             )
         }
 }
 
-internal fun resolveUpdateDateBucket(
+internal fun formatUpdateDayLabel(
     dayStart: Long,
     todayStart: Long,
     yesterdayStart: Long,
-    lastWeekStart: Long,
-): UpdateDateBucket = when {
-    dayStart >= todayStart -> UpdateDateBucket.TODAY
-    dayStart >= yesterdayStart -> UpdateDateBucket.YESTERDAY
-    dayStart >= lastWeekStart -> UpdateDateBucket.LAST_WEEK
-    else -> UpdateDateBucket.OLDER
+): String = when {
+    dayStart >= todayStart -> "Today"
+    dayStart >= yesterdayStart -> "Yesterday"
+    else -> ChapterDates.formatExact(dayStart, pattern = "MMMM d, yyyy") ?: "Older"
 }
 
 internal data class DateUpdateGroup(
-    val bucket: UpdateDateBucket,
+    val dayStart: Long,
     val label: String,
     val items: List<UpdateItem>,
 )

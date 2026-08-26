@@ -28,6 +28,7 @@ class SourceBrowseViewModel(
 
     private var currentPage = 1
     private var hasNextPage = true
+    private var isLoadingPage = false
     private var source: Source? = null
     private var currentQuery: String = ""
     private var activeFilters: FilterList = FilterList()
@@ -70,22 +71,25 @@ class SourceBrowseViewModel(
     fun loadNextPage() {
         val s = source ?: return
         if (!hasNextPage && currentPage > 1) return
+        if (isLoadingPage) return
 
         viewModelScope.launch {
+            isLoadingPage = true
             if (currentPage == 1) {
                 _state.value = BrowseState.Loading
             }
 
+            var skipLoadingReset = false
             try {
                 when (_selectedTab.value) {
                     BrowseTab.POPULAR -> {
                         val response = s.fetchPopularManga(currentPage)
-                        _webtoons.value = _webtoons.value + response.webtoons
+                        appendUniqueWebtoons(response.webtoons)
                         hasNextPage = response.hasNextPage
                     }
                     BrowseTab.LATEST -> {
                         val response = s.fetchLatestManga(currentPage)
-                        _webtoons.value = _webtoons.value + response.webtoons
+                        appendUniqueWebtoons(response.webtoons)
                         hasNextPage = response.hasNextPage
                     }
                     BrowseTab.SEARCH -> {
@@ -106,7 +110,7 @@ class SourceBrowseViewModel(
                                     thumbnail = smanga.thumbnail_url ?: ""
                                 )
                             }
-                            _webtoons.value = _webtoons.value + newWebtoons
+                            appendUniqueWebtoons(newWebtoons)
                             hasNextPage = response.hasNextPage
                         }
                     }
@@ -119,10 +123,12 @@ class SourceBrowseViewModel(
                     repairAttempted = true
                     val repaired = extensionManager.repairSourceAfterSerializationFailure(sourceId)
                     if (repaired) {
+                        skipLoadingReset = true
                         source = extensionManager.getSource(sourceId)
                         currentPage = 1
                         _webtoons.value = emptyList()
                         hasNextPage = true
+                        isLoadingPage = false
                         loadNextPage()
                         return@launch
                     }
@@ -133,7 +139,20 @@ class SourceBrowseViewModel(
                 } else {
                     _state.value = BrowseState.Success
                 }
+            } finally {
+                if (!skipLoadingReset) {
+                    isLoadingPage = false
+                }
             }
+        }
+    }
+
+    private fun appendUniqueWebtoons(incoming: List<Webtoon>) {
+        val existing = _webtoons.value
+        val seen = existing.map { it.identityKey() }.toMutableSet()
+        val unique = incoming.filter { item -> seen.add(item.identityKey()) }
+        if (unique.isNotEmpty()) {
+            _webtoons.value = existing + unique
         }
     }
 
@@ -150,6 +169,7 @@ class SourceBrowseViewModel(
     private fun resetAndLoad() {
         currentPage = 1
         hasNextPage = true
+        isLoadingPage = false
         _webtoons.value = emptyList()
         loadNextPage()
     }
@@ -166,6 +186,9 @@ class SourceBrowseViewModel(
         return false
     }
 }
+
+internal fun Webtoon.identityKey(): String =
+    url?.takeIf { it.isNotBlank() } ?: id
 
 sealed class BrowseState {
     object Loading : BrowseState()

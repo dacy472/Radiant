@@ -28,13 +28,12 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Manager responsible for the full extension lifecycle:
- * - Managing trusted repository URLs
- * - Fetching available extensions from repos
- * - Installing/uninstalling extension APKs
- * - Scanning installed extension APKs via PackageManager
- * - Loading extension sources into memory
- * - Providing access to active sources
+ * Mihon-style manager for the full extension lifecycle:
+ * - Maintains [installedExtensions] StateFlow of active sources (via [ExtensionLoader.loadExtensions])
+ * - Fetches remote repos ([findAvailableExtensions] / index.pb)
+ * - Compares remote versionCodes against installed builds for updates
+ * - Filters untrusted extensions by APK signature hashes ([ExtensionSignatureTrust])
+ * - Installs/uninstalls and syncs PackageManager installs into Room for Installed Sources UI
  */
 class ExtensionManager(
     private val context: Context,
@@ -45,8 +44,9 @@ class ExtensionManager(
     private val scope: kotlinx.coroutines.CoroutineScope
 ) {
     private val tag = "ExtensionManager"
+    private val signatureTrust = ExtensionSignatureTrust(context)
 
-    // Active extensions loaded in memory (cached for instant access)
+    // Active sources loaded in memory (Mihon: installed extension sources)
     private val _installedExtensions = MutableStateFlow<List<Source>>(emptyList())
     val installedExtensions: StateFlow<List<Source>> = _installedExtensions
 
@@ -63,6 +63,10 @@ class ExtensionManager(
     // Installed extension infos (from PackageManager scan)
     private val _installedExtensionInfos = MutableStateFlow<List<ExtensionInfo>>(emptyList())
     val installedExtensionInfos: StateFlow<List<ExtensionInfo>> = _installedExtensionInfos
+
+    /** Packages present on-device but blocked until signature trust is granted. */
+    private val _untrustedExtensions = MutableStateFlow<List<Extension.Untrusted>>(emptyList())
+    val untrustedExtensions: StateFlow<List<Extension.Untrusted>> = _untrustedExtensions
 
     // Dedicated source registry for reliable instance retrieval
     private val sourceRegistry = ConcurrentHashMap<String, Source>()
@@ -132,6 +136,7 @@ class ExtensionManager(
 
     // init MUST run after all StateFlows above — launching earlier races and NPEs on _isLoading
     init {
+        // Mihon-style: populate installedExtensions StateFlow from ExtensionLoader.loadExtensions
         scope.launch(Dispatchers.IO) {
             loadInstalledExtensions()
         }
@@ -220,6 +225,64 @@ class ExtensionManager(
     }
 
     // ─── Available extensions ───
+
+    /**
+     * Mihon-style remote catalog fetch:
+     * - pulls Keiyoushi [index.pb] via [ExtensionLoader.fetchRepoIndex]
+     * - keeps language-enabled entries
+     * - compares remote versionCode against installed builds → [availableUpdates]
+     *
+     * Returns [Extension.Available] models for the UI.
+     */
+    suspend fun findAvailableExtensions(repoUrl: String? = null): List<Extension.Available> =
+        withContext(Dispatchers.IO) {
+            ensureDefaultRepo()
+            val url = repoUrl ?: resolveRepoUrlForUpdates()
+            try {
+                val index = extensionLoader.fetchRepoIndex(url)
+                val processed = index.extensions.map { entry ->
+                    val iconUrl = entry.icon?.takeIf { it.startsWith("http") }
+                        ?: "https://cdn.jsdelivr.net/gh/keiyoushi/extensions@repo/icon/${entry.id}.png"
+                    entry.copy(icon = iconUrl, repoUrl = url)
+                }
+                val languageFiltered = filterAllowedRepoEntries(processed)
+                    .filter { isExtensionLanguageEnabled(it.lang) }
+                    .distinctBy { it.id }
+
+                _availableExtensions.value = languageFiltered
+
+                val prefs = context.getSharedPreferences("extension_cache", Context.MODE_PRIVATE)
+                try {
+                    val gson = com.google.gson.Gson()
+                    prefs.edit()
+                        .putString("cached_extensions", gson.toJson(languageFiltered))
+                        .putInt("cache_version", EXTENSION_CACHE_VERSION)
+                        .apply()
+                } catch (e: Exception) {
+                    Log.w(tag, "Failed to cache findAvailableExtensions result", e)
+                }
+
+                val installedCodes = _installedExtensionInfos.value
+                    .associate { it.packageName to it.versionCode }
+                    .ifEmpty {
+                        mergeInstalledExtensionInfos(
+                            extensionLoader.scanLocalExtensions(),
+                            extensionLoader.scanInstalledExtensions(),
+                        ).associate { it.packageName to it.versionCode }
+                    }
+                _availableUpdates.value = computeExtensionUpdates(languageFiltered, installedCodes)
+
+                Log.i(
+                    tag,
+                    "findAvailableExtensions: ${languageFiltered.size} available, " +
+                        "${_availableUpdates.value.size} update(s), langs=" +
+                        languageFiltered.mapNotNull { it.lang }.toSet(),
+                )
+            } catch (e: Exception) {
+                Log.e(tag, "findAvailableExtensions failed for $url", e)
+            }
+            getAvailableAsExtensions()
+        }
 
     /**
      * Compare installed builds against the live/cached repo index and publish extensions
@@ -753,10 +816,28 @@ class ExtensionManager(
 
     /**
      * Uninstall an extension.
-     * Deletes the local file and cached data, and updates UI state.
+     *
+     * - PackageManager-installed APKs: deletes any private copy, then returns an
+     *   [Intent.ACTION_DELETE] intent so the OS prompts the user to uninstall.
+     *   Local DB/state is reconciled later via [syncSystemInstalledExtensions]
+     *   (e.g. when the Extensions screen resumes after the system dialog).
+     * - Privately loaded APKs only: removes the local file and DB/state immediately.
+     *
+     * @return system uninstall [Intent] when the package is installed on-device; null if
+     *   only a private copy was removed.
      */
-    suspend fun uninstallExtension(packageName: String) = withContext(Dispatchers.IO) {
+    suspend fun uninstallExtension(packageName: String): Intent? = withContext(Dispatchers.IO) {
         Log.i(tag, "Uninstalling extension: $packageName")
+
+        // Always drop any privately copied APK under filesDir
+        extensionLoader.deleteLocalExtension(packageName)
+
+        if (extensionLoader.isPackageInstalled(packageName)) {
+            // Keep DB/in-memory state until the OS uninstall finishes; sync on resume.
+            Log.i(tag, "Package $packageName is system-installed; returning OS uninstall intent")
+            return@withContext getSystemUninstallIntent(packageName)
+        }
+
         removeExtensionLocally(packageName)
         refreshTrustCache()
 
@@ -768,7 +849,8 @@ class ExtensionManager(
         loadInstalledExtensions(force = true)
         refreshAvailableUpdates()
 
-        Log.i(tag, "Extension $packageName fully uninstalled and unloaded.")
+        Log.i(tag, "Extension $packageName fully uninstalled and unloaded (local-only).")
+        null
     }
 
     data class ForceResetResult(
@@ -862,13 +944,51 @@ class ExtensionManager(
 
     suspend fun trustExtension(packageName: String) = withContext(Dispatchers.IO) {
         val existing = installedDao.getById(packageName)
+        val info = _installedExtensionInfos.value.find { it.packageName == packageName }
         if (existing != null) {
             installedDao.setTrusted(packageName, true)
         } else {
-            installedDao.insert(InstalledExtensionEntity(id = packageName, name = packageName, isTrusted = true))
+            installedDao.insert(
+                InstalledExtensionEntity(
+                    id = packageName,
+                    name = info?.name ?: packageName,
+                    isTrusted = true,
+                    versionCode = info?.versionCode ?: 0,
+                ),
+            )
         }
+
+        // Mihon-style: persist signing-cert trust key when we can read the package
+        try {
+            val flags = ExtensionSignatureTrust.packageFlags()
+            @Suppress("DEPRECATION")
+            val pkgInfo = context.packageManager.getPackageInfo(packageName, flags)
+            val signatures = signatureTrust.getSignatures(pkgInfo)
+            if (signatures.isNotEmpty()) {
+                signatureTrust.trust(
+                    packageName,
+                    ExtensionSignatureTrust.packageVersionCode(pkgInfo),
+                    signatures.last(),
+                )
+            } else if (!info?.signatureHash.isNullOrBlank()) {
+                signatureTrust.trust(packageName, info!!.versionCode, info.signatureHash!!)
+            }
+        } catch (e: Exception) {
+            info?.signatureHash?.let { hash ->
+                signatureTrust.trust(packageName, info.versionCode, hash)
+            }
+            Log.w(tag, "Could not read package signatures while trusting $packageName: ${e.message}")
+        }
+
+        _untrustedExtensions.update { list -> list.filterNot { it.pkgName == packageName } }
         refreshTrustCache()
         loadInstalledExtensions(force = true)
+    }
+
+    /** Trust an [Extension.Untrusted] by package + signature hash (Mihon ExtensionManager.trust). */
+    suspend fun trustUntrustedExtension(extension: Extension.Untrusted) = withContext(Dispatchers.IO) {
+        signatureTrust.trust(extension.pkgName, extension.versionCode, extension.signatureHash)
+        trustExtension(extension.pkgName)
     }
 
     suspend fun revokeTrust(packageName: String) = withContext(Dispatchers.IO) {
@@ -1029,6 +1149,88 @@ class ExtensionManager(
             "|advanced=${isAdvancedMode()}|langs=${_sourceLangs.value.joinToString(",")}"
     }
 
+    /**
+     * Sync system-installed Tachiyomi extension packages into Room so they reappear
+     * in the Installed Sources UI ([getInstalledAsExtensions] requires a DB row).
+     *
+     * Uses [ExtensionLoader.discoverSystemExtensionPackages] (PackageManager prefix scan),
+     * upserts allowlisted packages as trusted, and drops stale tachiyomi-prefix rows that
+     * are no longer installed system-wide and have no local APK copy.
+     *
+     * @return number of packages upserted into the database
+     */
+    suspend fun syncSystemInstalledExtensions(): Int = withContext(Dispatchers.IO) {
+        val discovered = extensionLoader.discoverSystemExtensionPackages()
+        val localPackages = extensionLoader.scanLocalExtensions()
+            .map { it.packageName }
+            .toSet()
+        val discoveredPackages = discovered.map { it.packageName }.toSet()
+        val untrusted = mutableListOf<Extension.Untrusted>()
+
+        var upserted = 0
+        for (info in discovered) {
+            if (!isPackageAllowed(info.packageName)) continue
+
+            val signatureOk = try {
+                val flags = ExtensionSignatureTrust.packageFlags()
+                @Suppress("DEPRECATION")
+                val pkgInfo = context.packageManager.getPackageInfo(info.packageName, flags)
+                signatureTrust.isTrusted(pkgInfo, signatureTrust.getSignatures(pkgInfo))
+            } catch (_: Exception) {
+                info.signatureHash?.equals(
+                    ExtensionSignatureTrust.OFFICIAL_KEIYOUSHI_FINGERPRINT,
+                    ignoreCase = true,
+                ) == true
+            }
+
+            val existing = installedDao.getById(info.packageName)
+            val shouldTrust = existing?.isTrusted == true || signatureOk
+            if (!shouldTrust && !info.signatureHash.isNullOrBlank()) {
+                untrusted.add(
+                    Extension.Untrusted(
+                        id = info.packageName,
+                        name = info.name,
+                        version = info.versionName,
+                        nsfw = info.nsfw,
+                        pkgName = info.packageName,
+                        versionCode = info.versionCode,
+                        signatureHash = info.signatureHash!!,
+                        extensionLibVersion = info.extensionLibVersion,
+                        libCompatibility = info.libCompatibility,
+                    ),
+                )
+            }
+
+            installedDao.insert(
+                InstalledExtensionEntity(
+                    id = info.packageName,
+                    name = info.name,
+                    isTrusted = shouldTrust,
+                    dateInstalled = existing?.dateInstalled ?: System.currentTimeMillis(),
+                    versionCode = info.versionCode,
+                ),
+            )
+            upserted++
+        }
+
+        _untrustedExtensions.value = untrusted
+
+        // Remove DB rows for uninstalled system packages that have no local APK
+        val prefix = ExtensionLoader.TACHIYOMI_EXTENSION_PREFIX
+        for (row in installedDao.getAll()) {
+            if (!row.id.startsWith(prefix)) continue
+            if (row.id in discoveredPackages || row.id in localPackages) continue
+            Log.i(tag, "Removing stale system extension from DB: ${row.id}")
+            installedDao.delete(row.id)
+        }
+
+        refreshTrustCache()
+        if (upserted > 0) {
+            Log.i(tag, "Synced $upserted system extension package(s) into installed_extensions")
+        }
+        upserted
+    }
+
     // ─── Load installed extensions (called on app startup) ───
 
     suspend fun loadInstalledExtensions(force: Boolean = false) = withContext(Dispatchers.IO) {
@@ -1039,6 +1241,8 @@ class ExtensionManager(
             val ownsLoadingFlag = !_isRepoRefreshing.value
             if (ownsLoadingFlag) _isLoading.value = true
             try {
+                // Re-discover PackageManager installs before purge/load so Installed Sources stays in sync
+                syncSystemInstalledExtensions()
                 purgeNonWhitelistedExtensionsInternal()
                 ensureDefaultRepo()
                 refreshTrustCache()
@@ -1249,11 +1453,11 @@ class ExtensionManager(
      * Convert available repo entries to Extension model for UI display.
      * Only curated English sources are listed.
      */
-    fun getAvailableAsExtensions(): List<Extension> {
+    fun getAvailableAsExtensions(): List<Extension.Available> {
         val installedPkgs = _installedExtensionInfos.value.map { it.packageName }.toSet()
         val trusted = _trustedPackages.value
         val advanced = isAdvancedMode()
-        return ExtensionAllowlist.dedupeBySlugPreferEn(
+        val entries = ExtensionAllowlist.dedupeBySlugPreferEn(
             _availableExtensions.value.distinctBy { it.id },
             packageSelector = { it.id },
             advancedMode = advanced,
@@ -1263,14 +1467,15 @@ class ExtensionManager(
             .filter { entry -> !installedPkgs.contains(entry.id) }
             // NSFW filter does not hide allowlisted packs (Manga18fx, Manhwa18.cc, etc.)
             .sortedBy { it.name.lowercase() }
-            .map { entry ->
+
+        return entries.map { entry ->
             val effectiveBaseUrl = entry.baseUrl ?: entry.sources?.firstOrNull()?.baseUrl ?: ""
             val downloadUrl = entry.apkUrl?.takeIf { it.isNotBlank() }
                 ?: entry.repoUrl?.let { repo ->
                     val base = repo.substringBeforeLast("/")
                     "$base/apk/${entry.fileName}"
                 }
-            
+
             Extension.Available(
                 id = entry.id,
                 name = entry.name,

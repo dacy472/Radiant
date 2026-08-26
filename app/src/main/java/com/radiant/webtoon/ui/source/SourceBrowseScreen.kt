@@ -3,7 +3,7 @@ package com.radiant.webtoon.ui.source
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.foundation.lazy.grid.rememberLazyGridState
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
@@ -217,7 +217,10 @@ fun SourceBrowseScreen(
                             verticalArrangement = Arrangement.spacedBy(12.dp),
                             horizontalArrangement = Arrangement.spacedBy(12.dp)
                         ) {
-                            items(webtoons) { webtoon ->
+                            itemsIndexed(
+                                webtoons.distinctBy { it.identityKey() },
+                                key = { index, item -> "${item.identityKey()}_$index" }
+                            ) { _, webtoon ->
                                 WebtoonThumbnailCard(
                                     webtoon = webtoon,
                                     onClick = { onWebtoonClick(sourceId, webtoon.url ?: webtoon.id) },

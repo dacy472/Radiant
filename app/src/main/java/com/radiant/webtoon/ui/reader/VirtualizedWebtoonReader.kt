@@ -40,6 +40,7 @@ import androidx.compose.ui.unit.dp
 import coil.size.Precision
 import com.radiant.webtoon.core.database.Chapter
 import com.radiant.webtoon.ui.components.RadiantAsyncImage
+import okhttp3.Headers
 
 /** Pages kept composed above/below the visible viewport. */
 private const val PAGES_ABOVE = 1
@@ -49,7 +50,8 @@ private const val PAGES_BELOW = 2
 fun VirtualizedWebtoonColumn(
     pages: List<String>,
     listState: LazyListState,
-    headersMap: Map<String, String>,
+    headers: Headers,
+    sourceId: String,
     screenWidthPx: Int,
     cropBorders: Boolean,
     nextChapter: Chapter?,
@@ -101,7 +103,8 @@ fun VirtualizedWebtoonColumn(
                 ReaderPageImage(
                     index = index,
                     pageUrl = pageUrl,
-                    headersMap = headersMap,
+                    headers = headers,
+                    sourceId = sourceId,
                     screenWidthPx = screenWidthPx,
                     cropBorders = cropBorders,
                     placeholderHeightPx = placeholderHeightPx,
@@ -158,7 +161,8 @@ fun VirtualizedWebtoonColumn(
 private fun ReaderPageImage(
     index: Int,
     pageUrl: String,
-    headersMap: Map<String, String>,
+    headers: Headers,
+    sourceId: String,
     screenWidthPx: Int,
     cropBorders: Boolean,
     placeholderHeightPx: Int,
@@ -176,7 +180,8 @@ private fun ReaderPageImage(
             .onGloballyPositioned { coordinates ->
                 onHeightMeasured(coordinates.size.height)
             },
-        headers = headersMap,
+        headers = headers,
+        sourceId = sourceId,
         widthPx = screenWidthPx,
         precision = Precision.INEXACT,
         crossfade = false,

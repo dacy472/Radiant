@@ -7,7 +7,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 
 /**
- * Runs a one-shot extension update check when the app process cold-starts.
+ * Runs a one-shot extension PackageManager sync + update check when the app process cold-starts.
  * [Application.onCreate] is only invoked for a new process, so this does not
  * re-fire when the user returns from the background.
  */
@@ -16,11 +16,13 @@ object ExtensionColdStartUpdate {
 
     fun schedule(app: WebtoonApplication, scope: CoroutineScope) {
         scope.launch(Dispatchers.IO) {
-            Log.d(TAG, "Cold-start extension purge and update check")
+            Log.d(TAG, "Cold-start extension PackageManager sync and update check")
+            app.extensionManager.syncSystemInstalledExtensions()
             app.extensionManager.purgeNonWhitelistedExtensions()
-            app.extensionManager.loadInstalledExtensions()
+            app.extensionManager.loadInstalledExtensions(force = true)
+            app.extensionManager.findAvailableExtensions()
             app.extensionManager.runBackgroundExtensionUpdateCheck()
-            Log.d(TAG, "Cold-start extension purge and update check finished")
+            Log.d(TAG, "Cold-start extension sync and update check finished")
         }
     }
 }

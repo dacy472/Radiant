@@ -97,8 +97,12 @@ class GlobalSearchViewModel(private val repository: WebtoonRepository) : ViewMod
             val more = repository.searchSourceNextPage(sourceId, query, nextPage) ?: return@launch
             _searchResults.update { map ->
                 val existing = map[sourceId] ?: return@update map
+                val seen = existing.webtoons.map { it.url?.takeIf { url -> url.isNotBlank() } ?: it.id }.toMutableSet()
+                val unique = more.webtoons.filter { item ->
+                    seen.add(item.url?.takeIf { url -> url.isNotBlank() } ?: item.id)
+                }
                 map + (sourceId to existing.copy(
-                    webtoons = existing.webtoons + more.webtoons,
+                    webtoons = existing.webtoons + unique,
                     hasNextPage = more.hasNextPage,
                     currentPage = nextPage,
                     error = more.error,

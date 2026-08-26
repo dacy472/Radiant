@@ -17,9 +17,13 @@ import kotlinx.coroutines.flow.collect
 import kotlinx.coroutines.launch
 import coil.ImageLoader
 import coil.ImageLoaderFactory
+import com.radiant.webtoon.core.image.NoStoreErrorResponseInterceptor
 import com.radiant.webtoon.core.image.RadiantImageLoader
+import com.radiant.webtoon.core.image.SourceImageCoilInterceptor
+import com.radiant.webtoon.core.image.SourceImageOkHttpInterceptor
 import com.radiant.webtoon.core.di.ExtensionCompatModule
 import eu.kanade.tachiyomi.network.NetworkHelper
+import okhttp3.logging.HttpLoggingInterceptor
 import kotlinx.serialization.ExperimentalSerializationApi
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
@@ -35,12 +39,28 @@ class WebtoonApplication : Application(), ImageLoaderFactory {
         val networkHelper: NetworkHelper by injectLazy()
         
         val imageClient = networkHelper.client.newBuilder()
+            .dispatcher(
+                okhttp3.Dispatcher().apply {
+                    maxRequests = 16
+                    maxRequestsPerHost = 3
+                }
+            )
             // Bound image concurrency to a small pool instead of a hard 1-at-a-time mutex
             // (old SequentialInterceptor) or fully unbounded parallel requests.
             .addInterceptor(
                 eu.kanade.tachiyomi.network.BoundedConcurrencyInterceptor(
                     com.radiant.webtoon.core.concurrent.AppWorkQueues.imageFetch
                 )
+            )
+            .addInterceptor(SourceImageOkHttpInterceptor(extensionManager))
+            .addNetworkInterceptor(NoStoreErrorResponseInterceptor())
+            // Absolute last network interceptor on the Coil clone (parent also logs HEADERS
+            // before NoStore). SourceImageOkHttpInterceptor is an application interceptor,
+            // so this sees the request after Referer injection.
+            .addNetworkInterceptor(
+                HttpLoggingInterceptor().apply {
+                    level = HttpLoggingInterceptor.Level.HEADERS
+                }
             )
             .build()
 
@@ -50,7 +70,7 @@ class WebtoonApplication : Application(), ImageLoaderFactory {
                 // images and require the site's own Referer/User-Agent headers, which the
                 // extension exposes via Source.getWebViewHeaders(). Without this, covers on
                 // browse/search/library grids can silently fail to load.
-                add(SourceHeaderInterceptor(extensionManager))
+                add(SourceImageCoilInterceptor(extensionManager))
             }
         }
     }
@@ -118,11 +138,17 @@ class WebtoonApplication : Application(), ImageLoaderFactory {
     override fun onCreate() {
         super.onCreate()
 
+        com.radiant.webtoon.core.debug.PageListDebugLogger.init(this)
+
         // Full Injekt graph for Tachiyomi/Mihon extensions — must run before any DEX load
         ExtensionCompatModule.install(this)
+        eu.kanade.tachiyomi.network.interceptor.ForegroundActivityHolder.register(this)
 
         LibraryUpdateWorker.cancel(this@WebtoonApplication)
+        // Library chapter checks are manual-only (Updates tab). Never enqueue on startup.
         ExtensionUpdateWorker.schedule(this@WebtoonApplication)
+        // Background: PackageManager → Room sync for system-installed extension APKs,
+        // then purge / load / update check (see ExtensionColdStartUpdate).
         ExtensionColdStartUpdate.schedule(this@WebtoonApplication, applicationScope)
         applicationScope.launch {
             settingsManager.migrateAutoUpdateToManual()
@@ -161,57 +187,5 @@ class WebtoonApplication : Application(), ImageLoaderFactory {
         eu.kanade.tachiyomi.network.POST("https://dummy.com", headers)
         eu.kanade.tachiyomi.network.POST("https://dummy.com", headers, body)
         eu.kanade.tachiyomi.network.POST("https://dummy.com", headers, body, cache)
-    }
-}
-
-/**
- * Attaches the matching installed source's headers (e.g. Referer, User-Agent) to image
- * requests, so hotlink-protected covers/pages load the same way they would from within the
- * source itself. Matches purely by comparing the image URL's host against each installed
- * source's [com.radiant.webtoon.core.source.Source.baseUrl] host.
- */
-private class SourceHeaderInterceptor(
-    private val extensionManager: ExtensionManager
-) : coil.intercept.Interceptor {
-
-    override suspend fun intercept(chain: coil.intercept.Interceptor.Chain): coil.request.ImageResult {
-        val request = chain.request
-        val url = (request.data as? String) ?: (request.data as? android.net.Uri)?.toString()
-        // Skip headers already explicitly set by the caller (e.g. the reader screen sets its
-        // own per-page headers) to avoid sending duplicate header values.
-        val headers = url?.let { resolveHeadersForUrl(it) }
-            .orEmpty()
-            .filterKeys { key -> request.headers.values(key).isEmpty() }
-
-        val finalRequest = if (headers.isEmpty()) {
-            request
-        } else {
-            request.newBuilder().apply {
-                headers.forEach { (key, value) -> addHeader(key, value) }
-            }.build()
-        }
-        return chain.proceed(finalRequest)
-    }
-
-    private fun resolveHeadersForUrl(url: String): Map<String, String> {
-        return try {
-            val host = url.toHttpUrlOrNull()?.host ?: return emptyMap()
-            extensionManager.installedExtensions.value
-                .firstOrNull { source ->
-                    val sourceHost = normalizedBaseUrl(source.baseUrl)?.toHttpUrlOrNull()?.host ?: return@firstOrNull false
-                    host.equals(sourceHost, ignoreCase = true) ||
-                        host.endsWith(".$sourceHost", ignoreCase = true) ||
-                        sourceHost.endsWith(".$host", ignoreCase = true)
-                }
-                ?.getWebViewHeaders()
-                ?: emptyMap()
-        } catch (_: Exception) {
-            emptyMap()
-        }
-    }
-
-    private fun normalizedBaseUrl(baseUrl: String): String? {
-        if (baseUrl.isBlank()) return null
-        return if (baseUrl.startsWith("http://") || baseUrl.startsWith("https://")) baseUrl else "https://$baseUrl"
     }
 }

@@ -4,7 +4,7 @@ import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
-import androidx.compose.foundation.lazy.grid.items
+import androidx.compose.foundation.lazy.grid.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material3.*
@@ -67,7 +67,10 @@ fun MigrationListScreen(
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
-                items(mangas) { manga ->
+                itemsIndexed(
+                    mangas.distinctBy { it.url },
+                    key = { index, manga -> "${manga.url}_$index" }
+                ) { _, manga ->
                     MigrationMangaCard(manga = manga, onClick = { onMangaClick(manga.url, manga.title) })
                 }
             }

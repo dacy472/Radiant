@@ -3,7 +3,7 @@ package com.radiant.webtoon.ui.search
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Search
@@ -172,7 +172,10 @@ fun SearchScreen(
                     modifier = Modifier.fillMaxSize(),
                     contentPadding = PaddingValues(bottom = 80.dp)
                 ) {
-                    items(displaySources) { source ->
+                    itemsIndexed(
+                        displaySources.distinctBy { it.id },
+                        key = { index, source -> "${source.id}_$index" }
+                    ) { _, source ->
                         val sourceResult = results.find { it.sourceId == source.id }
                         val isSourceLoading = sourceResult?.status == SourceSearchStatus.Loading
                         
@@ -239,7 +242,14 @@ fun SearchScreen(
                                             contentPadding = PaddingValues(horizontal = 16.dp, vertical = 4.dp),
                                             horizontalArrangement = Arrangement.spacedBy(12.dp)
                                         ) {
-                                            items(sourceResult.webtoons) { webtoon ->
+                                            itemsIndexed(
+                                                sourceResult.webtoons.distinctBy {
+                                                    it.url?.takeIf { url -> url.isNotBlank() } ?: it.id
+                                                },
+                                                key = { index, item ->
+                                                    "${item.url?.takeIf { it.isNotBlank() } ?: item.id}_$index"
+                                                }
+                                            ) { _, webtoon ->
                                                 Box(modifier = Modifier.width(110.dp)) {
                                                     WebtoonThumbnailCard(
                                                         webtoon = webtoon,

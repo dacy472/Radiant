@@ -167,16 +167,20 @@ class WebtoonRepository(
             }
         }
 
-    suspend fun getChapterPages(sourceId: String, chapterId: String): List<String> =
-        getChapterPagesResult(sourceId, chapterId).pages
+    suspend fun getChapterPages(sourceId: String, chapterId: String, mangaId: String? = null): List<String> =
+        getChapterPagesResult(sourceId, chapterId, mangaId).pages
 
-    suspend fun getChapterPagesResult(sourceId: String, chapterId: String): com.radiant.webtoon.core.model.ChapterPagesResult =
+    suspend fun getChapterPagesResult(
+        sourceId: String,
+        chapterId: String,
+        mangaId: String? = null,
+    ): com.radiant.webtoon.core.model.ChapterPagesResult =
         withContext(Dispatchers.IO) {
             AppWorkQueues.withSourceNetwork {
                 val source = extensionManager.getSource(sourceId)
                     ?: throw IllegalArgumentException("Source '$sourceId' not found.")
                 try {
-                    source.getChapterPagesResult(chapterId)
+                    source.getChapterPagesResult(chapterId, mangaId)
                 } catch (e: Exception) {
                     android.util.Log.e("RADIANT_ERROR", "Failed to fetch pages for $chapterId", e)
                     throw e
@@ -257,6 +261,8 @@ class WebtoonRepository(
     suspend fun getChaptersForManga(mangaId: String): List<Chapter> = withContext(Dispatchers.IO) {
         chapterDao.getChapters(mangaId)
     }
+
+    fun allChaptersFlow(): Flow<List<Chapter>> = chapterDao.getAllChaptersFlow()
 
     suspend fun insertChaptersList(chapters: List<Chapter>) = withContext(Dispatchers.IO) {
         chapterDao.insertAll(chapters)

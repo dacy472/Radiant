@@ -1,6 +1,5 @@
 package com.radiant.webtoon.ui.extensions
 
-import android.os.Bundle
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material.icons.Icons
@@ -13,12 +12,9 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TopAppBar
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.fragment.app.FragmentActivity
-import androidx.preference.PreferenceFragmentCompat
-import com.radiant.webtoon.WebtoonApplication
 import com.radiant.webtoon.core.source.ExtensionManager
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -60,44 +56,16 @@ fun SourceSettingsScreen(
                     if (activity != null) {
                         val tag = "source_prefs_$sourceId"
                         if (activity.supportFragmentManager.findFragmentByTag(tag) == null) {
+                            // Factory returns Fragment so Kotlin never resolves PreferenceFragmentCompat
                             activity.supportFragmentManager
                                 .beginTransaction()
-                                .replace(
-                                    containerId,
-                                    SourcePreferenceFragment.newInstance(sourceId),
-                                    tag,
-                                )
+                                .replace(containerId, SourcePreferenceFragments.create(sourceId), tag)
                                 .commitNowAllowingStateLoss()
                         }
                     }
                     frame
                 },
             )
-        }
-    }
-}
-
-class SourcePreferenceFragment : PreferenceFragmentCompat() {
-    override fun onCreatePreferences(savedInstanceState: Bundle?, rootKey: String?) {
-        val sourceId = requireArguments().getString(ARG_SOURCE_ID).orEmpty()
-        preferenceManager.sharedPreferencesName = "source_$sourceId"
-        val screen = preferenceManager.createPreferenceScreen(requireContext())
-        preferenceScreen = screen
-
-        val app = requireContext().applicationContext as WebtoonApplication
-        val configurable = app.extensionManager.getConfigurableSource(sourceId)
-        configurable?.setupPreferenceScreen(screen)
-    }
-
-    companion object {
-        private const val ARG_SOURCE_ID = "source_id"
-
-        fun newInstance(sourceId: String): SourcePreferenceFragment {
-            return SourcePreferenceFragment().apply {
-                arguments = Bundle().apply {
-                    putString(ARG_SOURCE_ID, sourceId)
-                }
-            }
         }
     }
 }

@@ -6,6 +6,7 @@ import coil.disk.DiskCache
 import coil.memory.MemoryCache
 import coil.request.CachePolicy
 import coil.request.ImageRequest
+import kotlinx.coroutines.Dispatchers
 import okhttp3.OkHttpClient
 
 /** Disk-first image cache sizing for webtoon pages and cover thumbnails. */
@@ -20,6 +21,8 @@ object RadiantImageLoader {
     ): ImageLoader {
         return ImageLoader.Builder(context)
             .okHttpClient(okHttpClient)
+            .fetcherDispatcher(Dispatchers.IO.limitedParallelism(3))
+            .decoderDispatcher(Dispatchers.Default.limitedParallelism(3))
             .memoryCache {
                 MemoryCache.Builder(context)
                     .maxSizePercent(MEMORY_CACHE_MAX_SIZE_PERCENT)

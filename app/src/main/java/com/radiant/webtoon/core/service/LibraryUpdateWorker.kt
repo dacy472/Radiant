@@ -62,16 +62,32 @@ class LibraryUpdateWorker(
                                 manga_id = manga.url,
                                 name = remote.title,
                                 date_fetch = System.currentTimeMillis(),
-                                date_upload = 0L,
+                                date_upload = com.radiant.webtoon.core.util.ChapterDates.millisFrom(
+                                    rawDate = remote.date,
+                                    millis = remote.dateUploadMillis,
+                                ),
                                 chapter_number = remote.number?.toFloat() ?: -1f,
                                 source = manga.source,
                             )
                         }
 
+                    val uploadBackfill = remoteChapters.mapNotNull { remote ->
+                        val existing = existingChapters.firstOrNull { it.url == remote.id } ?: return@mapNotNull null
+                        val upload = com.radiant.webtoon.core.util.ChapterDates.millisFrom(
+                            rawDate = remote.date,
+                            millis = remote.dateUploadMillis,
+                        )
+                        if (upload <= 0L || existing.date_upload == upload) return@mapNotNull null
+                        existing.copy(date_upload = upload)
+                    }
+
                     if (newChapters.isNotEmpty()) {
                         Log.d(TAG, "Inserting ${newChapters.size} new chapters for ${manga.title}")
                         repository.insertChaptersList(newChapters)
                         updatedCount++
+                    }
+                    if (uploadBackfill.isNotEmpty()) {
+                        repository.insertChaptersList(uploadBackfill)
                     }
                 } catch (e: Exception) {
                     Log.e(TAG, "Failed to get updates for ${manga.title}", e)
@@ -121,7 +137,9 @@ class LibraryUpdateWorker(
             Constraints.Builder().setRequiredNetworkType(NetworkType.CONNECTED).build()
 
         fun cancel(context: Context) {
-            WorkManager.getInstance(context).cancelUniqueWork(WORK_NAME)
+            val workManager = WorkManager.getInstance(context)
+            workManager.cancelUniqueWork(WORK_NAME)
+            workManager.cancelAllWorkByTag(TAG)
         }
 
         /**

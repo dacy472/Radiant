@@ -8,7 +8,6 @@ import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.FilterList
 import androidx.compose.material.icons.filled.Sort
 import androidx.compose.material3.*
@@ -32,6 +31,7 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.SharingStarted
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 
@@ -41,6 +41,7 @@ enum class LibraryFilter { ALL, UNREAD, DOWNLOADED, STARTED }
 data class LibraryDisplayItem(
     val manga: Manga,
     val unreadCount: Int = 0,
+    val downloadedCount: Int = 0,
     val isDownloaded: Boolean = false,
     val hasHistory: Boolean = false,
 )
@@ -89,23 +90,36 @@ class LibraryViewModel(private val repository: WebtoonRepository) : ViewModel() 
             combine(
                 repository.mangaDao.getFavoritesFlow(),
                 repository.downloadedChaptersFlow(),
-            ) { favorites, _ -> favorites }
-                .collect { enrich(it) }
+                repository.allChaptersFlow(),
+            ) { favorites, downloads, chapters ->
+                Triple(favorites, downloads, chapters)
+            }.collect { (favorites, downloads, chapters) ->
+                enrich(favorites, downloads, chapters)
+            }
         }
     }
 
-    private suspend fun enrich(favorites: List<Manga>) {
-        val downloads = repository.getDownloadedWebtoonKeys()
+    private suspend fun enrich(
+        favorites: List<Manga>,
+        downloads: List<com.radiant.webtoon.core.database.DownloadedChapter> = emptyList(),
+        allChapters: List<com.radiant.webtoon.core.database.Chapter>? = null,
+    ) {
+        val downloadCounts = downloads.groupingBy { "${it.sourceId}|${it.webtoonId}" }.eachCount()
         val history = runCatching { repository.getHistory() }.getOrDefault(emptyList())
         val historyKeys = history.map { "${it.source_id}|${it.webtoon_id}" }.toSet()
+        val chaptersByManga = allChapters?.groupBy { it.manga_id }
 
         _displayItems.value = favorites.map { manga ->
-            val chapters = repository.getChaptersForManga(manga.url)
+            val key = "${manga.source}|${manga.url}"
+            val chapters = chaptersByManga?.get(manga.url)
+                ?: repository.getChaptersForManga(manga.url)
+            val downloadedCount = downloadCounts[key] ?: 0
             LibraryDisplayItem(
                 manga = manga,
                 unreadCount = chapters.count { !it.read },
-                isDownloaded = downloads.contains("${manga.source}|${manga.url}"),
-                hasHistory = historyKeys.contains("${manga.source}|${manga.url}"),
+                downloadedCount = downloadedCount,
+                isDownloaded = downloadedCount > 0,
+                hasHistory = historyKeys.contains(key),
             )
         }
 
@@ -143,7 +157,7 @@ class LibraryViewModel(private val repository: WebtoonRepository) : ViewModel() 
     fun assignToCategory(manga: Manga, categoryId: Int) {
         viewModelScope.launch {
             repository.assignMangaToCategory(manga.url, manga.source, categoryId)
-            enrich(repository.getLibrary())
+            enrich(repository.getLibrary(), repository.downloadedChaptersFlow().first())
         }
     }
 }
@@ -260,30 +274,18 @@ fun LibraryScreen(
                     verticalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     items(items, key = { "${it.manga.source}|${it.manga.url}" }) { item ->
-                        Box {
-                            WebtoonThumbnailCard(
-                                webtoon = Webtoon(
-                                    id = item.manga.url,
-                                    title = item.manga.title,
-                                    thumbnail = item.manga.thumbnail_url ?: ""
-                                ),
-                                onClick = { onWebtoonClick(item.manga.source, item.manga.url) },
-                                onLongClick = { assignTarget = item.manga },
-                                sourceId = item.manga.source,
-                                unreadCount = item.unreadCount,
-                            )
-                            if (item.isDownloaded) {
-                                Icon(
-                                    Icons.Default.Download,
-                                    contentDescription = null,
-                                    tint = MaterialTheme.colorScheme.tertiary,
-                                    modifier = Modifier
-                                        .align(Alignment.BottomStart)
-                                        .padding(4.dp)
-                                        .size(16.dp)
-                                )
-                            }
-                        }
+                        WebtoonThumbnailCard(
+                            webtoon = Webtoon(
+                                id = item.manga.url,
+                                title = item.manga.title,
+                                thumbnail = item.manga.thumbnail_url ?: ""
+                            ),
+                            onClick = { onWebtoonClick(item.manga.source, item.manga.url) },
+                            onLongClick = { assignTarget = item.manga },
+                            sourceId = item.manga.source,
+                            unreadCount = item.unreadCount,
+                            downloadedCount = item.downloadedCount,
+                        )
                     }
                 }
             }

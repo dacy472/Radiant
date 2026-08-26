@@ -6,12 +6,16 @@ import eu.kanade.tachiyomi.source.model.FilterList
 import eu.kanade.tachiyomi.source.model.MangasPage
 import eu.kanade.tachiyomi.source.model.SManga
 import eu.kanade.tachiyomi.source.online.HttpSource
+import com.radiant.webtoon.core.debug.PageListDebugLogger
 import com.radiant.webtoon.core.model.*
+import eu.kanade.tachiyomi.network.JavaScriptEngine
 import eu.kanade.tachiyomi.source.model.PageListFetchResult
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.Headers
+import uy.kohesive.injekt.injectLazy
 import eu.kanade.tachiyomi.source.Source as TachiyomiSource
+import eu.kanade.tachiyomi.source.model.SChapter
 
 /**
  * Wraps a Tachiyomi CatalogueSource/HttpSource and adapts it to our app's Source interface.
@@ -24,6 +28,8 @@ class TachiyomiSourceAdapter(
 ) : Source {
 
     private val tag = "TachiyomiAdapter[${tachiyomiSource.name}]"
+
+    private val jsEngine: JavaScriptEngine by injectLazy()
 
     companion object {
         /**
@@ -276,6 +282,10 @@ class TachiyomiSourceAdapter(
             }
             val detailedManga = update.manga
             val chapterList = update.chapters
+            ChapterMemoCache.putManga(id, webtoonId, detailedManga.memo)
+            if (detailedManga.url.isNotBlank() && detailedManga.url != webtoonId) {
+                ChapterMemoCache.putManga(id, detailedManga.url, detailedManga.memo)
+            }
 
             Webtoon(
                 id = webtoonId,
@@ -287,16 +297,7 @@ class TachiyomiSourceAdapter(
                 description = detailedManga.description,
                 genres = detailedManga.genre?.split(", ")?.map { it.trim() } ?: emptyList(),
                 chapters = chapterList.mapIndexed { index, sChapter ->
-                    Chapter(
-                        id = sChapter.url,
-                        title = sChapter.name,
-                        url = sChapter.url,
-                        date = if (sChapter.date_upload > 0) {
-                            java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault())
-                                .format(java.util.Date(sChapter.date_upload))
-                        } else null,
-                        number = if (sChapter.chapter_number >= 0) sChapter.chapter_number.toDouble() else (chapterList.size - index).toDouble()
-                    )
+                    toAppChapter(sChapter, index, chapterList.size)
                 }
             )
         } catch (e: Exception) {
@@ -316,66 +317,232 @@ class TachiyomiSourceAdapter(
         val update = lockedMangaUpdate(manga, fetchDetails = false, fetchChapters = true)
         val chapterList = update.chapters
         chapterList.mapIndexed { index, sChapter ->
-            Chapter(
-                id = sChapter.url,
-                title = sChapter.name,
-                url = sChapter.url,
-                date = if (sChapter.date_upload > 0) {
-                    java.text.SimpleDateFormat("yyyy-MM-dd", java.util.Locale.getDefault())
-                        .format(java.util.Date(sChapter.date_upload))
-                } else null,
-                number = if (sChapter.chapter_number >= 0) sChapter.chapter_number.toDouble() else (chapterList.size - index).toDouble()
-            )
+            toAppChapter(sChapter, index, chapterList.size)
         }
     }
 
     override suspend fun getChapterPages(chapterId: String): List<String> =
-        getChapterPagesResult(chapterId).pages
+        getChapterPagesResult(chapterId, mangaId = null).pages
 
-    override suspend fun getChapterPagesResult(chapterId: String): ChapterPagesResult =
+    override suspend fun getChapterPagesResult(chapterId: String, mangaId: String?): ChapterPagesResult =
         withContext(Dispatchers.IO) {
-            try {
-                val chapter = eu.kanade.tachiyomi.source.model.SChapter.create().apply {
-                    url = chapterId
-                }
+            val session = PageListDebugLogger.beginSession(
+                sourceId = id,
+                sourceName = name,
+                chapterId = chapterId,
+                chapterUrl = getChapterPageUrl(chapterId),
+            )
+            PageListDebugLogger.withSession(session) {
+                try {
+                    var chapter = buildSChapter(chapterId)
+                    if (needsMemoRefresh(chapter, mangaId)) {
+                        chapter = refreshChapterMemo(chapterId, mangaId!!) ?: chapter
+                    }
 
-                val fetch = when (val httpSource = tachiyomiSource as? HttpSource) {
-                    null -> {
-                        val pages = tachiyomiSource.getPageList(chapter)
+                    // Flame Comics: native __NEXT_DATA__ scraper — bypasses the extension APK.
+                    val httpSource = tachiyomiSource as? HttpSource
+                    val flameMatch = httpSource != null && isFlameComicsSource()
+                    if (flameMatch) {
+                        val chapterUrl = httpSource!!.getChapterUrl(chapter)
+                        PageListDebugLogger.logStep(
+                            step = "flame_comics_native_scraper_start",
+                            strategy = "FlameComicsScraper.fetchPageList",
+                            extra = mapOf("url" to chapterUrl),
+                        )
+                        val scraped = FlameComicsScraper.from(httpSource, jsEngine)
+                            .fetchPageList(chapterUrl)
+                        if (scraped.isNotEmpty()) {
+                            return@withSession ChapterPagesResult(
+                                pages = scraped,
+                                httpStatus = 200,
+                                chapterUrl = chapterUrl,
+                                cloudflareChallenge = false,
+                            )
+                        }
+                        PageListDebugLogger.logEmptyPageList(
+                            step = "flame_comics_native_scraper_empty",
+                            strategy = "FlameComicsScraper.fetchPageList",
+                            extra = mapOf("url" to chapterUrl),
+                        )
+                        return@withSession ChapterPagesResult(
+                            pages = emptyList(),
+                            httpStatus = null,
+                            chapterUrl = chapterUrl,
+                            cloudflareChallenge = false,
+                        )
+                    }
+
+                    // Prefer suspend getPageList() — modern extensions (e.g. Asura Scans)
+                    // override it and throw UnsupportedOperationException from pageListRequest.
+                    var pages = tryGetPageList(chapter)
+                    if (pages.isEmpty() && !mangaId.isNullOrBlank() && chapter.memo.isEmpty()) {
+                        // Generic recovery for any source that needs chapter memo.
+                        chapter = refreshChapterMemo(chapterId, mangaId) ?: chapter
+                        if (chapter.memo.isNotEmpty()) {
+                            pages = tryGetPageList(chapter)
+                        }
+                    } else if (pages.isEmpty() && needsMemoRefresh(chapter, mangaId)) {
+                        chapter = refreshChapterMemo(chapterId, mangaId!!) ?: chapter
+                        pages = tryGetPageList(chapter)
+                    }
+
+                    val fetch = if (httpSource == null) {
+                        if (pages.isEmpty()) {
+                            PageListDebugLogger.logEmptyPageList(
+                                step = "empty_after_getPageList",
+                                strategy = "non-HttpSource.getPageList",
+                            )
+                        }
                         PageListFetchResult(
                             pages = pages,
                             httpStatus = -1,
                             chapterUrl = getChapterPageUrl(chapterId),
                             cloudflareChallenge = false,
                         )
+                    } else if (pages.isNotEmpty()) {
+                        PageListFetchResult(
+                            pages = pages,
+                            httpStatus = -1,
+                            chapterUrl = try {
+                                httpSource.getChapterUrl(chapter)
+                            } catch (_: Exception) {
+                                getChapterPageUrl(chapterId)
+                            },
+                            cloudflareChallenge = false,
+                        )
+                    } else {
+                        // Empty from getPageList — try legacy metadata path unless UOE.
+                        try {
+                            httpSource.fetchPageListWithMetadata(chapter)
+                        } catch (_: UnsupportedOperationException) {
+                            PageListFetchResult(
+                                pages = emptyList(),
+                                httpStatus = -1,
+                                chapterUrl = try {
+                                    httpSource.getChapterUrl(chapter)
+                                } catch (_: Exception) {
+                                    getChapterPageUrl(chapterId)
+                                },
+                                cloudflareChallenge = false,
+                            )
+                        }
                     }
-                    else -> httpSource.fetchPageListWithMetadata(chapter)
-                }
 
-                ChapterPagesResult(
-                    pages = mapPageUrls(fetch.pages),
-                    httpStatus = fetch.httpStatus.takeIf { it >= 0 },
-                    chapterUrl = fetch.chapterUrl,
-                    cloudflareChallenge = fetch.cloudflareChallenge,
-                )
-            } catch (e: Exception) {
-                Log.e(tag, "Failed to get chapter pages: $chapterId", e)
-                val isCloudflare = e.message?.contains("cloudflare", ignoreCase = true) == true
-                if (isCloudflare) {
+                    val mappedPages = mapPageUrls(fetch.pages)
+
+                    if (mappedPages.isEmpty() && fetch.pages.isNotEmpty()) {
+                        PageListDebugLogger.logEmptyPageList(
+                            step = "empty_after_mapPageUrls",
+                            httpStatus = fetch.httpStatus,
+                            strategy = "mapPageUrls",
+                            extra = mapOf("rawPageCount" to fetch.pages.size.toString()),
+                        )
+                    } else if (mappedPages.isEmpty()) {
+                        PageListDebugLogger.logEmptyPageList(
+                            step = "empty_final",
+                            httpStatus = fetch.httpStatus,
+                            strategy = "getChapterPagesResult",
+                            extra = mapOf(
+                                "cloudflareChallenge" to fetch.cloudflareChallenge.toString(),
+                            ),
+                        )
+                    }
+
                     ChapterPagesResult(
-                        pages = emptyList(),
-                        httpStatus = 403,
-                        chapterUrl = getChapterPageUrl(chapterId),
-                        cloudflareChallenge = true,
+                        pages = mappedPages,
+                        httpStatus = fetch.httpStatus.takeIf { it >= 0 },
+                        chapterUrl = fetch.chapterUrl,
+                        cloudflareChallenge = fetch.cloudflareChallenge,
                     )
-                } else {
-                    throw friendlyError(e, "Failed to load chapter pages")
+                } catch (e: Exception) {
+                    Log.e(tag, "Failed to get chapter pages: $chapterId", e)
+                    PageListDebugLogger.logEmptyPageList(
+                        step = "getChapterPagesResult_exception",
+                        error = e,
+                        strategy = "getChapterPagesResult",
+                    )
+                    val isCloudflare = e.message?.contains("cloudflare", ignoreCase = true) == true
+                    if (isCloudflare) {
+                        ChapterPagesResult(
+                            pages = emptyList(),
+                            httpStatus = 403,
+                            chapterUrl = getChapterPageUrl(chapterId),
+                            cloudflareChallenge = true,
+                        )
+                    } else {
+                        throw friendlyError(e, "Failed to load chapter pages")
+                    }
                 }
             }
         }
 
+    private fun toAppChapter(sChapter: SChapter, index: Int, total: Int): Chapter {
+        ChapterMemoCache.putChapter(id, sChapter.url, sChapter.memo)
+        return Chapter(
+            id = sChapter.url,
+            title = sChapter.name,
+            url = sChapter.url,
+            date = com.radiant.webtoon.core.util.ChapterDates.formatExact(sChapter.date_upload),
+            dateUploadMillis = sChapter.date_upload.takeIf { it > 0 } ?: 0L,
+            number = if (sChapter.chapter_number >= 0) {
+                sChapter.chapter_number.toDouble()
+            } else {
+                (total - index).toDouble()
+            },
+        )
+    }
+
+    private fun buildSChapter(chapterId: String): SChapter {
+        return SChapter.create().apply {
+            url = chapterId
+            ChapterMemoCache.getChapter(id, chapterId)?.let { memo = it }
+        }
+    }
+
+    private fun needsMemoRefresh(chapter: SChapter, mangaId: String?): Boolean {
+        if (mangaId.isNullOrBlank()) return false
+        if (chapter.memo.isNotEmpty()) return false
+        // Asura / similar hosts require memo for page URLs.
+        return name.contains("asura", ignoreCase = true) ||
+            baseUrl.contains("asura", ignoreCase = true)
+    }
+
+    private suspend fun refreshChapterMemo(chapterId: String, mangaId: String): SChapter? {
+        return try {
+            val manga = SManga.create().apply {
+                url = mangaId
+                ChapterMemoCache.getManga(id, mangaId)?.let { memo = it }
+            }
+            val update = lockedMangaUpdate(manga, fetchDetails = true, fetchChapters = true)
+            ChapterMemoCache.putManga(id, mangaId, update.manga.memo)
+            update.chapters.forEach { ChapterMemoCache.putChapter(id, it.url, it.memo) }
+            val match = update.chapters.firstOrNull { it.url == chapterId }
+                ?: update.chapters.firstOrNull {
+                    it.url.substringAfterLast('/') == chapterId.substringAfterLast('/')
+                }
+            match
+        } catch (e: Exception) {
+            Log.e(tag, "Failed to refresh chapter memo for $chapterId", e)
+            null
+        }
+    }
+
+    private suspend fun tryGetPageList(chapter: SChapter): List<eu.kanade.tachiyomi.source.model.Page> {
+        return try {
+            tachiyomiSource.getPageList(chapter)
+        } catch (e: UnsupportedOperationException) {
+            emptyList()
+        } catch (e: Exception) {
+            PageListDebugLogger.logParseFailure(
+                step = "getPageList_exception",
+                error = e,
+            )
+            emptyList()
+        }
+    }
+
     override fun getChapterPageUrl(chapterId: String): String {
-        val chapter = eu.kanade.tachiyomi.source.model.SChapter.create().apply { url = chapterId }
+        val chapter = buildSChapter(chapterId)
         val http = tachiyomiSource as? HttpSource
         return if (http != null) {
             try {
@@ -386,6 +553,10 @@ class TachiyomiSourceAdapter(
         } else {
             super.getChapterPageUrl(chapterId)
         }
+    }
+
+    private fun isFlameComicsSource(): Boolean {
+        return FlameComicsScraper.matchesSource(name = name, id = id, baseUrl = baseUrl)
     }
 
     private suspend fun mapPageUrls(pages: List<eu.kanade.tachiyomi.source.model.Page>): List<String> {

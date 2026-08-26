@@ -47,10 +47,14 @@ interface Source {
 
     /**
      * Fetches chapter pages with HTTP metadata for reader error handling.
+     * [mangaId] enables memo recovery for sources like Asura Scans that require
+     * chapter metadata from a fresh chapter-list fetch.
      */
-    suspend fun getChapterPagesResult(chapterId: String): com.radiant.webtoon.core.model.ChapterPagesResult {
-        val pages = getChapterPages(chapterId)
-        return com.radiant.webtoon.core.model.ChapterPagesResult(pages = pages)
+    suspend fun getChapterPagesResult(
+        chapterId: String,
+        mangaId: String? = null,
+    ): com.radiant.webtoon.core.model.ChapterPagesResult {
+        return com.radiant.webtoon.core.model.ChapterPagesResult(pages = getChapterPages(chapterId))
     }
 
     /**

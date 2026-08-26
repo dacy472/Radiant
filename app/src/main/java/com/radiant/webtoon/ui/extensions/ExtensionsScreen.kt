@@ -4,7 +4,7 @@ import android.content.Intent
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
+import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Settings
@@ -12,23 +12,28 @@ import androidx.compose.material.icons.filled.Verified
 import com.radiant.webtoon.core.source.ExtensionLibCompatibility
 import androidx.compose.material3.*
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.compose.ui.platform.LocalContext
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.ViewModel
+import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewModelScope
 import androidx.lifecycle.viewmodel.compose.viewModel
+import com.radiant.webtoon.core.model.Extension
+import com.radiant.webtoon.core.source.ExtensionManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.combine
-import androidx.compose.runtime.getValue
-import androidx.lifecycle.compose.collectAsStateWithLifecycle
-import androidx.compose.runtime.LaunchedEffect
-import com.radiant.webtoon.core.source.ExtensionManager
-import com.radiant.webtoon.core.model.Extension
 import kotlinx.coroutines.launch
-import androidx.compose.ui.Alignment
+import java.util.concurrent.atomic.AtomicBoolean
 
 class ExtensionsViewModel(private val extensionManager: ExtensionManager) : ViewModel() {
     private val _installed = MutableStateFlow<List<Extension>>(emptyList())
@@ -48,6 +53,9 @@ class ExtensionsViewModel(private val extensionManager: ExtensionManager) : View
 
     private val _isUpdatingAll = MutableStateFlow(false)
     val isUpdatingAll: StateFlow<Boolean> = _isUpdatingAll
+
+    /** After launching ACTION_DELETE, resync when the Extensions screen resumes. */
+    private val awaitingUninstallSync = AtomicBoolean(false)
 
     init {
         viewModelScope.launch {
@@ -115,9 +123,31 @@ class ExtensionsViewModel(private val extensionManager: ExtensionManager) : View
     fun uninstall(packageName: String) {
         viewModelScope.launch {
             try {
-                extensionManager.uninstallExtension(packageName)
+                val uninstallIntent = extensionManager.uninstallExtension(packageName)
+                if (uninstallIntent != null) {
+                    awaitingUninstallSync.set(true)
+                    _installIntent.value = uninstallIntent
+                }
+                _error.value = null
             } catch (e: Exception) {
                 _error.value = "Uninstall failed: ${e.message}"
+            }
+        }
+    }
+
+    /**
+     * Reconcile DB/state after the system uninstall dialog (reuse
+     * [ExtensionManager.syncSystemInstalledExtensions] via load).
+     */
+    fun onScreenResumed() {
+        if (!awaitingUninstallSync.compareAndSet(true, false)) return
+        viewModelScope.launch {
+            try {
+                extensionManager.loadInstalledExtensions(force = true)
+                _error.value = null
+            } catch (e: Exception) {
+                awaitingUninstallSync.set(true)
+                _error.value = "Failed to refresh after uninstall: ${e.message}"
             }
         }
     }
@@ -157,6 +187,7 @@ fun ExtensionsScreen(
     val error by viewModel.error.collectAsStateWithLifecycle()
     val installIntent by viewModel.installIntent.collectAsStateWithLifecycle()
     val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
 
     LaunchedEffect(installIntent) {
         installIntent?.let { intent ->
@@ -166,6 +197,16 @@ fun ExtensionsScreen(
             }
             viewModel.clearInstallIntent()
         }
+    }
+
+    DisposableEffect(lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_RESUME) {
+                viewModel.onScreenResumed()
+            }
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     LaunchedEffect(Unit) {
@@ -231,7 +272,10 @@ fun ExtensionsScreen(
                                     modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 20.dp, bottom = 8.dp),
                                 )
                             }
-                            items(installed, key = { "installed-${it.id}" }) { extension ->
+                            itemsIndexed(
+                                installed.distinctBy { it.id },
+                                key = { index, extension -> "installed-${extension.id}_$index" }
+                            ) { _, extension ->
                                 InstalledChannelRow(
                                     extension = extension,
                                     extensionManager = extensionManager,
@@ -251,7 +295,10 @@ fun ExtensionsScreen(
                                     modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 20.dp, bottom = 8.dp),
                                 )
                             }
-                            items(available, key = { "available-${it.id}" }) { extension ->
+                            itemsIndexed(
+                                available.distinctBy { it.id },
+                                key = { index, extension -> "available-${extension.id}_$index" }
+                            ) { _, extension ->
                                 AvailableChannelRow(
                                     extension = extension,
                                     onInstall = { viewModel.install(extension.id) },

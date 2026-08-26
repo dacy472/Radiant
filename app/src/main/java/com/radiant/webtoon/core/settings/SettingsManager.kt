@@ -52,6 +52,8 @@ class SettingsManager(private val context: Context) {
         val READER_TAP_ZONES = booleanPreferencesKey("reader_tap_zones")
         val PURE_BLACK_READER = booleanPreferencesKey("pure_black_reader")
         val DOWNLOAD_INDEX_BACKFILLED = booleanPreferencesKey("download_index_backfilled")
+        val PAGE_LIST_DEBUG_MODE = booleanPreferencesKey("page_list_debug_mode")
+        val CUSTOM_USER_AGENT = stringPreferencesKey("custom_user_agent")
 
         const val DEFAULT_REPO = "" // User will add their own repos
 
@@ -292,5 +294,20 @@ class SettingsManager(private val context: Context) {
     val pureBlackReader: Flow<Boolean> = context.dataStore.data.map { it[PURE_BLACK_READER] ?: false }
     suspend fun setPureBlackReader(enabled: Boolean) {
         context.dataStore.edit { it[PURE_BLACK_READER] = enabled }
+    }
+
+    val pageListDebugMode: Flow<Boolean> = context.dataStore.data.map { it[PAGE_LIST_DEBUG_MODE] ?: false }
+    suspend fun setPageListDebugMode(enabled: Boolean) {
+        context.dataStore.edit { it[PAGE_LIST_DEBUG_MODE] = enabled }
+    }
+
+    /**
+     * Optional override for OkHttp / Cloudflare WebView. Blank means use
+     * [android.webkit.WebSettings.getDefaultUserAgent].
+     */
+    val customUserAgent: Flow<String> = context.dataStore.data.map { it[CUSTOM_USER_AGENT] ?: "" }
+
+    suspend fun setCustomUserAgent(value: String) {
+        context.dataStore.edit { it[CUSTOM_USER_AGENT] = value }
     }
 }

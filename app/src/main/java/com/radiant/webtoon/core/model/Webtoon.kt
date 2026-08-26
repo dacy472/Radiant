@@ -19,6 +19,10 @@ data class Chapter(
     @SerializedName("title") val title: String,
     @SerializedName("url") val url: String? = null,
     @SerializedName("date") val date: String? = null,
+    /** Epoch millis of the source upload date; 0 if the site did not provide one. */
+    @SerializedName("dateUploadMillis") val dateUploadMillis: Long = 0L,
     @SerializedName("number") val number: Double? = null,
     @SerializedName("read") val read: Boolean = false,
+    /** JSON object string of Tachiyomi SChapter.memo (e.g. Asura mangaSlug). */
+    @SerializedName("memo") val memoJson: String? = null,
 )
