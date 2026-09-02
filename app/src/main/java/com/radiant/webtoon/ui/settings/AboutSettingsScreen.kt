@@ -14,6 +14,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.radiant.webtoon.BuildConfig
 
 private const val GITHUB_REPOSITORY_URL = "https://github.com/dacy472/Radiant"
 
@@ -52,12 +53,12 @@ fun AboutSettingsScreen(onBackClick: () -> Unit) {
             Spacer(modifier = Modifier.height(16.dp))
             
             Text(
-                text = "Webtoon Reader",
+                text = "Radiant",
                 style = MaterialTheme.typography.headlineMedium
             )
             
             Text(
-                text = "Version 2.0.0",
+                text = "Version ${BuildConfig.VERSION_NAME}",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

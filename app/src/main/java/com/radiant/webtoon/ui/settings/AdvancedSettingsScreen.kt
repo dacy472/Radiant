@@ -13,6 +13,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
+import com.radiant.webtoon.BuildConfig
 import com.radiant.webtoon.core.settings.SettingsManager
 import kotlinx.coroutines.launch
 
@@ -324,7 +325,7 @@ fun AdvancedSettingsScreen(
 
             Spacer(modifier = Modifier.height(24.dp))
             Text(
-                text = "Version 2.0.0 (Local Extensions)",
+                text = "Version ${BuildConfig.VERSION_NAME} (Local Extensions)",
                 style = MaterialTheme.typography.labelSmall,
                 color = Color.Gray,
                 modifier = Modifier

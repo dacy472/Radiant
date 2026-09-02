@@ -15,7 +15,7 @@ android {
         minSdk = 26
         targetSdk = 36
         versionCode = 1
-        versionName = "1.0"
+        versionName = "0.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -32,6 +32,9 @@ android {
         release {
             isMinifyEnabled = false
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
+            // First releases use the debug keystore so GitHub APKs are installable without a
+            // committed release keystore. Replace with a release signingConfig before Play Store.
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
     compileOptions {
