@@ -5,7 +5,8 @@ import androidx.lifecycle.viewModelScope
 import com.radiant.webtoon.core.database.Manga
 import com.radiant.webtoon.core.model.Webtoon
 import com.radiant.webtoon.core.repository.WebtoonRepository
-import com.radiant.webtoon.core.source.Source
+import com.radiant.webtoon.core.usecase.MangaIdentifier
+import com.radiant.webtoon.core.usecase.MigrateWebtoonUseCase
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -13,6 +14,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 class MigrationViewModel(private val repository: WebtoonRepository) : ViewModel() {
+
+    private val migrateWebtoonUseCase = MigrateWebtoonUseCase(repository)
 
     private val _mangasToMigrate = MutableStateFlow<List<Manga>>(emptyList())
     val mangasToMigrate: StateFlow<List<Manga>> = _mangasToMigrate.asStateFlow()
@@ -31,56 +34,21 @@ class MigrationViewModel(private val repository: WebtoonRepository) : ViewModel(
         }
     }
 
-    /**
-     * Phase 2: Migrate reading progress and swap source/URL.
-     */
-    fun migrateWebtoon(oldManga: Manga, newWebtoonData: Webtoon, newSourceId: String, onComplete: () -> Unit) {
+    fun migrateWebtoon(
+        oldManga: Manga,
+        newWebtoonData: Webtoon,
+        newSourceId: String,
+        onComplete: () -> Unit,
+    ) {
         viewModelScope.launch {
             _isMigrating.value = true
             try {
-                val newSource = repository.extensionManager.getSource(newSourceId) 
-                    ?: throw Exception("Target source not found")
-                
-                // Step A: Fetch fresh chapter list from the NEW source
-                val newChaptersRaw = newSource.getChapterList(newWebtoonData.id)
-                
-                // Step B: Progress Sync
-                val oldChapters = repository.getChaptersForManga(oldManga.url)
-                val readChapters = oldChapters.filter { it.read }
-                
-                val newChapters = newChaptersRaw.map { remote ->
-                    // Attempt to find a matching chapter by number
-                    val matchingOld = readChapters.find { 
-                        it.chapter_number == remote.number?.toFloat() 
-                    }
-                    
-                    com.radiant.webtoon.core.database.Chapter(
-                        url = remote.id,
-                        manga_id = newWebtoonData.id,
-                        name = remote.title,
-                        chapter_number = remote.number?.toFloat() ?: -1f,
-                        source = newSourceId,
-                        read = matchingOld != null,
-                        bookmark = matchingOld?.bookmark ?: false,
-                        last_page_read = matchingOld?.last_page_read ?: 0,
-                        date_fetch = 0L, // Don't flood Updates with migrated chapters
-                        date_upload = com.radiant.webtoon.core.util.ChapterDates.millisFrom(
-                            rawDate = remote.date,
-                            millis = remote.dateUploadMillis,
-                        ).takeIf { it > 0L } ?: matchingOld?.date_upload ?: 0L,
-                    )
-                }
-                
-                // Step C: Execute Atomic Swap in DB
-                repository.executeMigration(
-                    oldUrl = oldManga.url,
-                    oldSource = oldManga.source,
-                    newUrl = newWebtoonData.id,
-                    newSource = newSourceId,
-                    newThumbnail = newWebtoonData.thumbnail,
-                    newChapters = newChapters
+                val newWebtoonId = newWebtoonData.url?.takeIf { it.isNotBlank() } ?: newWebtoonData.id
+                migrateWebtoonUseCase(
+                    oldId = MangaIdentifier(url = oldManga.url, sourceId = oldManga.source),
+                    newId = MangaIdentifier(url = newWebtoonId, sourceId = newSourceId),
+                    newWebtoon = newWebtoonData,
                 )
-                
                 onComplete()
             } catch (e: Exception) {
                 android.util.Log.e("MigrationViewModel", "Migration failed", e)
@@ -89,6 +57,4 @@ class MigrationViewModel(private val repository: WebtoonRepository) : ViewModel(
             }
         }
     }
-    
-    fun getMangaDao() = repository.mangaDao
 }

@@ -442,7 +442,7 @@ private fun InstalledChannelRow(
             }
         } else if (installedExt?.isTrusted == true) {
             val sourceId = extensionManager.findSourceIdForPackage(extension.id)
-            if (sourceId != null && extensionManager.getConfigurableSource(sourceId) != null) {
+            if (sourceId != null) {
                 IconButton(onClick = { onSourceSettingsClick(sourceId) }) {
                     Icon(Icons.Default.Settings, contentDescription = "Source settings")
                 }

@@ -36,6 +36,14 @@ class UserAgentInterceptorTest {
         assertNull(captured.header("Accept"))
     }
 
+    @Test
+    fun pinsUpdatedUserAgentAfterCloudflareBypass() {
+        val interceptor = UserAgentInterceptor { "Settings-UA/1.0" }
+        interceptor.userAgent = "WebView-Clearance-UA/2.0"
+        val captured = capture(interceptor, Request.Builder().url("https://example.com/").build())
+        assertEquals("WebView-Clearance-UA/2.0", captured.header("User-Agent"))
+    }
+
     private fun capture(
         interceptor: okhttp3.Interceptor,
         request: Request,

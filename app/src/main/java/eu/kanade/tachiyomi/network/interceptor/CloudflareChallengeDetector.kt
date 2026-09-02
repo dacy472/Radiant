@@ -5,8 +5,11 @@ import okhttp3.Response
 /**
  * Detects Cloudflare anti-bot challenge responses that should trigger a WebView bypass.
  *
- * Matches Mihon: 403/503 plus challenge HTML. A `cf-ray` header alone is not a challenge —
- * almost every Cloudflare-proxied response has one.
+ * Matches Mihon / existing app behavior:
+ * - Official `cf-mitigated: challenge` header (current Mihon), and/or
+ * - HTTP 403/503 plus challenge HTML markers (legacy + Mangafire-style pages).
+ *
+ * A `cf-ray` header alone is not a challenge — almost every Cloudflare-proxied response has one.
  */
 internal object CloudflareChallengeDetector {
 
@@ -21,6 +24,7 @@ internal object CloudflareChallengeDetector {
         "challenge-platform",
         "cf-challenge",
         "cf-turnstile",
+        "cf_chl_",
         "Just a moment",
         "Enable JavaScript and cookies to continue",
         "Checking your browser",
@@ -29,8 +33,15 @@ internal object CloudflareChallengeDetector {
     )
 
     fun isChallengeResponse(response: Response): Boolean {
+        // Official Cloudflare signal (Mihon): do not require HTML peek.
+        if (isCfMitigatedChallenge(response)) return true
         if (response.code !in CHALLENGE_STATUS_CODES) return false
         return peekChallengeHtml(response)
+    }
+
+    /** https://developers.cloudflare.com/cloudflare-challenges/.../detect-response/ */
+    fun isCfMitigatedChallenge(response: Response): Boolean {
+        return response.header("cf-mitigated").equals("challenge", ignoreCase = true)
     }
 
     fun peekChallengeHtml(response: Response): Boolean {

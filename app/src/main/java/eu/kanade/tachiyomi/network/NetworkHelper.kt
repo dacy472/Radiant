@@ -2,6 +2,7 @@ package eu.kanade.tachiyomi.network
 
 import android.content.Context
 import com.radiant.webtoon.core.settings.SettingsManager
+import eu.kanade.tachiyomi.network.interceptor.BaseUrlRewriteInterceptor
 import eu.kanade.tachiyomi.network.interceptor.CloudflareInterceptor
 import eu.kanade.tachiyomi.network.interceptor.ConnectionResetRetryInterceptor
 import eu.kanade.tachiyomi.network.interceptor.FlameComicsJsonRepairInterceptor
@@ -18,15 +19,11 @@ import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import eu.kanade.tachiyomi.network.interceptor.limitConcurrentRequestsPerHost
 import okhttp3.Cache
-import okhttp3.CipherSuite
-import okhttp3.ConnectionSpec
 import okhttp3.Dispatcher
 import okhttp3.Dns
 import okhttp3.Interceptor
 import okhttp3.OkHttpClient
-import okhttp3.Protocol
 import okhttp3.Response
-import okhttp3.TlsVersion
 import okhttp3.dnsoverhttps.DnsOverHttps
 import okhttp3.HttpUrl.Companion.toHttpUrl
 import okhttp3.logging.HttpLoggingInterceptor
@@ -108,12 +105,7 @@ class NetworkHelper(context: Context) {
      */
     val cloudflareInterceptor = CloudflareInterceptor(appContext, cookieJar, userAgentInterceptor)
 
-    /**
-     * Standard client for general requests — the singleton OkHttpClient extensions use.
-     *
-     * Deliberately omits IgnoreGzipInterceptor / BrotliInterceptor (Mihon modern networking).
-     */
-    val client: OkHttpClient by lazy {
+    private val dohDns: Dns by lazy {
         val bootstrapClient = OkHttpClient.Builder()
             .connectTimeout(10, TimeUnit.SECONDS)
             .readTimeout(10, TimeUnit.SECONDS)
@@ -131,7 +123,7 @@ class NetworkHelper(context: Context) {
         // Encrypted DNS first so ISPs cannot poison or RST lookups for blocked manga hosts.
         // System DNS is only used if Cloudflare DoH itself fails. Prefer IPv4 when both
         // families exist — emulator IPv6 often connects then gets RST.
-        val dns = object : Dns {
+        object : Dns {
             override fun lookup(hostname: String): List<InetAddress> {
                 val addresses = try {
                     doh.lookup(hostname)
@@ -142,35 +134,17 @@ class NetworkHelper(context: Context) {
                 return if (ipv4.isNotEmpty()) ipv4 else addresses
             }
         }
+    }
 
-        // Cipher-suite alignment with modern Android Chrome — not a full JA3 impersonation
-        // (no GREASE / TLS extensions). Bootstrap DoH client keeps OkHttp default specs.
-        val chromeLikeSpec = ConnectionSpec.Builder(ConnectionSpec.MODERN_TLS)
-            .tlsVersions(TlsVersion.TLS_1_3, TlsVersion.TLS_1_2)
-            .cipherSuites(
-                CipherSuite.TLS_AES_128_GCM_SHA256,
-                CipherSuite.TLS_AES_256_GCM_SHA384,
-                CipherSuite.TLS_CHACHA20_POLY1305_SHA256,
-                CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
-                CipherSuite.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
-                CipherSuite.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
-                CipherSuite.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
-                CipherSuite.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256,
-                CipherSuite.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256,
-            )
-            .build()
-
-        OkHttpClient.Builder()
-            .dns(dns)
-            .connectionSpecs(listOf(chromeLikeSpec))
+    private fun buildDoHClient(includeCloudflareInterceptor: Boolean): OkHttpClient {
+        return OkHttpClient.Builder()
+            .dns(dohDns)
             .dispatcher(
                 Dispatcher().apply {
                     maxRequests = 16
                     maxRequestsPerHost = 3
                 }
             )
-            // OkHttp HTTP/2 fingerprints are RST'd by Cloudflare before any challenge HTML.
-            .protocols(listOf(Protocol.HTTP_1_1))
             .retryOnConnectionFailure(true)
             .connectTimeout(30, TimeUnit.SECONDS)
             .readTimeout(30, TimeUnit.SECONDS)
@@ -186,8 +160,13 @@ class NetworkHelper(context: Context) {
             .addNetworkInterceptor(CloudflareCookieInterceptor(cookieJar))
             .addInterceptor(UncaughtExceptionInterceptor())
             .addInterceptor(userAgentInterceptor)
+            .addInterceptor(BaseUrlRewriteInterceptor())
             .addInterceptor(FlameComicsJsonRepairInterceptor())
-            .addInterceptor(cloudflareInterceptor)
+            .apply {
+                if (includeCloudflareInterceptor) {
+                    addInterceptor(cloudflareInterceptor)
+                }
+            }
             .addInterceptor(ConnectionResetRetryInterceptor())
             // Pace every host at 3 req/s so chapter CDNs and site HTML cannot burst
             // Cloudflare's "too many requests" filter. Image Coil client inherits this.
@@ -202,6 +181,20 @@ class NetworkHelper(context: Context) {
             )
             .build()
     }
+
+    /**
+     * Standard client for general requests — the singleton OkHttpClient extensions use.
+     *
+     * Deliberately omits IgnoreGzipInterceptor / BrotliInterceptor (Mihon modern networking).
+     */
+    val client: OkHttpClient by lazy { buildDoHClient(includeCloudflareInterceptor = true) }
+
+    /**
+     * DoH-enabled client for WebView resource loads during Cloudflare bypass.
+     * Omits [CloudflareInterceptor] so [WebViewClient.shouldInterceptRequest] cannot
+     * re-enter the bypass mutex while a challenge WebView is already active.
+     */
+    val webViewResourceClient: OkHttpClient by lazy { buildDoHClient(includeCloudflareInterceptor = false) }
 
     /**
      * Same client as [client]. Mihon deprecated a separate Cloudflare client because

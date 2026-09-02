@@ -55,6 +55,9 @@ class SettingsManager(private val context: Context) {
         val PAGE_LIST_DEBUG_MODE = booleanPreferencesKey("page_list_debug_mode")
         val CUSTOM_USER_AGENT = stringPreferencesKey("custom_user_agent")
 
+        /** JSON map of sourceId → override base URL (blank value = use extension default). */
+        val SOURCE_BASE_URL_OVERRIDES = stringPreferencesKey("source_base_url_overrides")
+
         const val DEFAULT_REPO = "" // User will add their own repos
 
         private val AUTO_UPDATE_FREQUENCIES = setOf("6h", "12h", "daily")
@@ -309,5 +312,51 @@ class SettingsManager(private val context: Context) {
 
     suspend fun setCustomUserAgent(value: String) {
         context.dataStore.edit { it[CUSTOM_USER_AGENT] = value }
+    }
+
+    val sourceBaseUrlOverrides: Flow<Map<String, String>> = context.dataStore.data.map { prefs ->
+        parseSourceBaseUrlOverrides(prefs[SOURCE_BASE_URL_OVERRIDES])
+    }
+
+    suspend fun setSourceBaseUrlOverride(sourceId: String, url: String?) {
+        context.dataStore.edit { prefs ->
+            val current = parseSourceBaseUrlOverrides(prefs[SOURCE_BASE_URL_OVERRIDES]).toMutableMap()
+            val trimmed = url?.trim().orEmpty()
+            if (trimmed.isBlank()) {
+                current.remove(sourceId)
+            } else {
+                current[sourceId] = trimmed
+            }
+            if (current.isEmpty()) {
+                prefs.remove(SOURCE_BASE_URL_OVERRIDES)
+            } else {
+                prefs[SOURCE_BASE_URL_OVERRIDES] = serializeSourceBaseUrlOverrides(current)
+            }
+        }
+    }
+
+    suspend fun clearSourceBaseUrlOverride(sourceId: String) {
+        setSourceBaseUrlOverride(sourceId, null)
+    }
+
+    private fun parseSourceBaseUrlOverrides(raw: String?): Map<String, String> {
+        if (raw.isNullOrBlank()) return emptyMap()
+        return runCatching {
+            val json = org.json.JSONObject(raw)
+            buildMap {
+                for (key in json.keys()) {
+                    val value = json.optString(key, "").trim()
+                    if (value.isNotBlank()) put(key, value)
+                }
+            }
+        }.getOrElse { emptyMap() }
+    }
+
+    private fun serializeSourceBaseUrlOverrides(overrides: Map<String, String>): String {
+        val json = org.json.JSONObject()
+        overrides.forEach { (sourceId, url) ->
+            if (url.isNotBlank()) json.put(sourceId, url)
+        }
+        return json.toString()
     }
 }

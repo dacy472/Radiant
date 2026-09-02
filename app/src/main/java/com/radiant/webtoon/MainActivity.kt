@@ -235,7 +235,10 @@ fun WebtoonApp() {
                     onWebtoonClick = { sid, wid ->
                         navController.navigate("detail/${encodeNav(sid)}/${encodeNav(wid)}")
                     },
-                    onBackClick = { navController.popBackStack() }
+                    onBackClick = { navController.popBackStack() },
+                    onWebViewClick = { url ->
+                        navController.navigate("webview?url=${encodeNav(url)}&sourceId=${encodeNav(sourceId)}")
+                    },
                 )
             }
 
@@ -274,7 +277,11 @@ fun WebtoonApp() {
                     repository = repository,
                     onBackClick = { navController.popBackStack() },
                     onMangaClick = { mangaId, title ->
-                        navController.navigate("global_search?initialQuery=${encodeNav(title)}&migrateFromMangaId=${encodeNav(mangaId)}")
+                        navController.navigate(
+                            "global_search?initialQuery=${encodeNav(title)}" +
+                                "&migrateFromMangaId=${encodeNav(mangaId)}" +
+                                "&migrateFromSourceId=${encodeNav(sourceId)}"
+                        )
                     }
                 )
             }
@@ -317,16 +324,7 @@ fun WebtoonApp() {
                 )
             }
 
-            composable(
-                route = "global_search?initialQuery={initialQuery}&migrateFromMangaId={migrateFromMangaId}",
-                arguments = listOf(
-                    navArgument("initialQuery") { type = NavType.StringType; nullable = true; defaultValue = null },
-                    navArgument("migrateFromMangaId") { type = NavType.StringType; nullable = true; defaultValue = null }
-                )
-            ) { backStackEntry ->
-                val initialQuery = backStackEntry.arguments?.getString("initialQuery")?.let { decodeNav(it) }
-                val migrateFromMangaId = backStackEntry.arguments?.getString("migrateFromMangaId")?.let { decodeNav(it) }
-                
+            composable("global_search") {
                 com.radiant.webtoon.ui.search.SearchScreen(
                     repository = repository,
                     onWebtoonClick = { sourceId, webtoonId ->
@@ -335,11 +333,43 @@ fun WebtoonApp() {
                     onBrowseClick = { sourceId ->
                         navController.navigate("source/${encodeNav(sourceId)}")
                     },
+                    onWebViewClick = { sourceId, url ->
+                        navController.navigate("webview?url=${encodeNav(url)}&sourceId=${encodeNav(sourceId)}")
+                    },
+                )
+            }
+
+            composable(
+                route = "global_search?initialQuery={initialQuery}&migrateFromMangaId={migrateFromMangaId}&migrateFromSourceId={migrateFromSourceId}",
+                arguments = listOf(
+                    navArgument("initialQuery") { type = NavType.StringType; nullable = true; defaultValue = null },
+                    navArgument("migrateFromMangaId") { type = NavType.StringType; nullable = true; defaultValue = null },
+                    navArgument("migrateFromSourceId") { type = NavType.StringType; nullable = true; defaultValue = null },
+                )
+            ) { backStackEntry ->
+                val initialQuery = backStackEntry.arguments?.getString("initialQuery")?.let { decodeNav(it) }
+                val migrateFromMangaId = backStackEntry.arguments?.getString("migrateFromMangaId")?.let { decodeNav(it) }
+                val migrateFromSourceId = backStackEntry.arguments?.getString("migrateFromSourceId")?.let { decodeNav(it) }
+
+                com.radiant.webtoon.ui.search.SearchScreen(
+                    repository = repository,
+                    onWebtoonClick = { sourceId, webtoonId ->
+                        navController.navigate("detail/${encodeNav(sourceId)}/${encodeNav(webtoonId)}")
+                    },
+                    onBrowseClick = { sourceId ->
+                        navController.navigate("source/${encodeNav(sourceId)}")
+                    },
+                    onWebViewClick = { sourceId, url ->
+                        navController.navigate("webview?url=${encodeNav(url)}&sourceId=${encodeNav(sourceId)}")
+                    },
                     initialQuery = initialQuery,
                     migrateFromMangaId = migrateFromMangaId,
-                    onMigrationComplete = {
-                        // After migration, go back to Library or Browse
-                        navController.popBackStack("browse", inclusive = false)
+                    migrateFromSourceId = migrateFromSourceId,
+                    onMigrationComplete = { newSourceId, newWebtoonId ->
+                        navController.navigate("detail/${encodeNav(newSourceId)}/${encodeNav(newWebtoonId)}") {
+                            popUpTo(Screen.Browse.route) { inclusive = false }
+                            launchSingleTop = true
+                        }
                     }
                 )
             }

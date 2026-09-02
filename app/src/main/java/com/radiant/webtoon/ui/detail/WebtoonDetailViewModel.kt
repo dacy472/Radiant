@@ -18,6 +18,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.combine
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
@@ -36,6 +38,9 @@ class WebtoonDetailViewModel(
     private val refreshMutex = Mutex()
     private var activeRefresh: kotlinx.coroutines.CompletableDeferred<Unit>? = null
 
+    /** Tracks which webtoonId already received a first-open auto-refresh this session. */
+    private var lastAutoRefreshedId: String? = null
+
     // ── Database-first state ──
 
     /**
@@ -51,6 +56,9 @@ class WebtoonDetailViewModel(
      */
     private val _chapters = MutableStateFlow<List<com.radiant.webtoon.core.database.Chapter>>(emptyList())
     val chapters: StateFlow<List<com.radiant.webtoon.core.database.Chapter>> = _chapters
+
+    /** Latest Room manga row (null = not yet in DB). Used for first-open auto-fetch. */
+    private val _mangaRow = MutableStateFlow<Manga?>(null)
 
     // Favorite is derived from the Room manga row
     private val _isFavorite = MutableStateFlow(false)
@@ -73,30 +81,57 @@ class WebtoonDetailViewModel(
     val downloadTasks: StateFlow<Map<String, DownloadStatus>> = _downloadTasks
 
     /**
+     * Multi-select identity is [Chapter.url] (composite PK with manga_id — no Long id).
+     */
+    private val _selectedChapterIds = MutableStateFlow<Set<String>>(emptySet())
+    val selectedChapterIds: StateFlow<Set<String>> = _selectedChapterIds.asStateFlow()
+
+    val isInSelectionMode: StateFlow<Boolean> = _selectedChapterIds
+        .map { it.isNotEmpty() }
+        .stateIn(viewModelScope, SharingStarted.WhileSubscribed(5_000), false)
+
+    private var appContext: android.content.Context? = null
+
+    /** Optional context for download queue; set from the Screen when available. */
+    fun bindContext(context: android.content.Context) {
+        appContext = context.applicationContext
+    }
+
+    /**
      * Entry point called by the Screen with the navigation arguments.
-     * Observes Room only — does not scrape or fetch from the network.
-     * Call [refreshFromNetwork] from an explicit user action to update.
+     * Observes Room; auto-fetches from network once when chapters are empty / manga missing.
      */
     fun loadWebtoon(sourceId: String, webtoonId: String) {
         currentSourceId = sourceId
         currentWebtoonId = webtoonId
         repairAttempted = false
+        lastAutoRefreshedId = null
         _error.value = null
         _isLoading.value = false
+        clearSelection()
 
         // ── Observe Room continuously so UI is populated from local DB ──
         viewModelScope.launch {
             mangaDao.getMangaFlow(webtoonId, sourceId).collect { manga ->
+                _mangaRow.value = manga
                 if (manga != null) {
                     _webtoon.value = manga.toWebtoon()
                     _isFavorite.value = manga.favorite
+                } else {
+                    _webtoon.value = null
+                    _isFavorite.value = false
                 }
+                maybeAutoRefreshFromRoom(webtoonId)
             }
         }
 
         viewModelScope.launch {
             chapterDao.getChaptersFlow(webtoonId).collect { chapters ->
                 _chapters.value = chapters
+                // Drop selections for chapters no longer present
+                val urls = chapters.map { it.url }.toSet()
+                _selectedChapterIds.value = _selectedChapterIds.value.filter { it in urls }.toSet()
+                maybeAutoRefreshFromRoom(webtoonId)
             }
         }
 
@@ -121,6 +156,28 @@ class WebtoonDetailViewModel(
                 updateDownloadStatuses()
             }
         }
+    }
+
+    /**
+     * First-open only: if Room has no chapters or manga is missing/uninitialized,
+     * trigger one network refresh. Never repeats for the same [loadWebtoon] session.
+     */
+    private fun maybeAutoRefreshFromRoom(webtoonId: String) {
+        if (webtoonId != currentWebtoonId) return
+        if (lastAutoRefreshedId == webtoonId) return
+        if (_isRefreshing.value) return
+
+        val chaptersEmpty = _chapters.value.isEmpty()
+        val manga = _mangaRow.value
+        val uninitialized = manga == null || !manga.initialized
+        if (!chaptersEmpty && !uninitialized) return
+
+        // Only auto when chapters are empty (first open / missing list).
+        // Uninitialized with existing chapters is unusual; still allow if chapters empty.
+        if (!chaptersEmpty) return
+
+        lastAutoRefreshedId = webtoonId
+        refreshFromNetwork()
     }
 
     /**
@@ -333,6 +390,15 @@ class WebtoonDetailViewModel(
         }
     }
 
+    /** Batch-download currently selected chapters, then clear selection. */
+    fun downloadSelected() {
+        val ids = _selectedChapterIds.value
+        if (ids.isEmpty()) return
+        val ctx = appContext ?: return
+        downloadSelected(ctx, ids)
+        clearSelection()
+    }
+
     /** Deletes a single completed chapter's downloaded files + DB row. */
     fun deleteDownloadedChapter(chapterId: String) {
         viewModelScope.launch {
@@ -350,14 +416,57 @@ class WebtoonDetailViewModel(
         }
     }
 
+    /** Delete downloads for selected chapters instantly, then clear selection. */
+    fun deleteSelectedDownloads() {
+        val ids = _selectedChapterIds.value
+        if (ids.isEmpty()) return
+        deleteDownloadedChapters(ids)
+        clearSelection()
+    }
+
     /** Marks a set of chapters read/unread — used by the multi-select toolbar. */
     fun markChaptersRead(chapterIds: Set<String>, read: Boolean) {
         if (chapterIds.isEmpty()) return
         viewModelScope.launch {
-            for (id in chapterIds) {
-                chapterDao.updateRead(id, currentWebtoonId, read)
-            }
+            chapterDao.updateRead(currentWebtoonId, chapterIds.toList(), read)
         }
+    }
+
+    fun markSelectedAsRead(read: Boolean) {
+        val ids = _selectedChapterIds.value
+        if (ids.isEmpty()) return
+        markChaptersRead(ids, read)
+        clearSelection()
+    }
+
+    fun bookmarkSelected(bookmark: Boolean) {
+        val ids = _selectedChapterIds.value
+        if (ids.isEmpty()) return
+        viewModelScope.launch {
+            chapterDao.updateBookmark(currentWebtoonId, ids.toList(), bookmark)
+            clearSelection()
+        }
+    }
+
+    // ── Multi-selection (identity = Chapter.url) ──
+
+    fun toggleSelection(chapterId: String) {
+        val current = _selectedChapterIds.value
+        _selectedChapterIds.value = if (chapterId in current) current - chapterId else current + chapterId
+    }
+
+    fun selectAll() {
+        _selectedChapterIds.value = _chapters.value.map { it.url }.toSet()
+    }
+
+    fun invertSelection() {
+        val visible = _chapters.value.map { it.url }.toSet()
+        val selected = _selectedChapterIds.value
+        _selectedChapterIds.value = visible - selected
+    }
+
+    fun clearSelection() {
+        _selectedChapterIds.value = emptySet()
     }
 
     private fun enqueueChapters(

@@ -53,12 +53,13 @@ fun WebViewScreen(
     headers: Map<String, String> = emptyMap(),
     onBackClick: () -> Unit
 ) {
+    val loadUrl = remember(url) { WebViewUrlNormalizer.normalizeForCloudflareClearance(url) }
     var isLoading by remember { mutableStateOf(true) }
     var pageError by remember { mutableStateOf<String?>(null) }
     var webViewRef by remember { mutableStateOf<WebView?>(null) }
     var loadedUrl by remember { mutableStateOf<String?>(null) }
     val networkHelper = remember { Injekt.get<NetworkHelper>() }
-    val headerMap = remember(url, headers) {
+    val headerMap = remember(loadUrl, headers) {
         HashMap<String, String>(headers.size + 2).apply {
             headers.forEach { (key, value) ->
                 if (value.isNotBlank() && !key.equals("X-Radiant-Source-Id", ignoreCase = true)) {
@@ -71,7 +72,7 @@ fun WebViewScreen(
                 if (ua.isNotBlank()) put("User-Agent", ua)
             }
             if (keys.none { it.equals("Referer", ignoreCase = true) }) {
-                val origin = url.toHttpUrlOrNull()?.let { httpUrl ->
+                val origin = loadUrl.toHttpUrlOrNull()?.let { httpUrl ->
                     val defaultPort = if (httpUrl.scheme == "https") 443 else 80
                     val port = if (httpUrl.port != defaultPort) ":${httpUrl.port}" else ""
                     "${httpUrl.scheme}://${httpUrl.host}$port/"
@@ -83,6 +84,12 @@ fun WebViewScreen(
 
     DisposableEffect(Unit) {
         onDispose {
+            runCatching {
+                webViewRef?.url?.toHttpUrlOrNull()?.let { httpUrl ->
+                    networkHelper.cookieJar.syncFromWebView(httpUrl)
+                }
+            }
+            runCatching { CookieManager.getInstance().flush() }
             webViewRef?.apply {
                 stopLoading()
                 destroy()
@@ -91,19 +98,29 @@ fun WebViewScreen(
         }
     }
 
+    val dismiss: () -> Unit = {
+        runCatching {
+            webViewRef?.url?.toHttpUrlOrNull()?.let { httpUrl ->
+                networkHelper.cookieJar.syncFromWebView(httpUrl)
+            }
+        }
+        runCatching { CookieManager.getInstance().flush() }
+        onBackClick()
+    }
+
     Scaffold(
         topBar = {
             TopAppBar(
                 title = {
                     Text(
-                        url,
+                        loadUrl,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         style = MaterialTheme.typography.titleMedium
                     )
                 },
                 navigationIcon = {
-                    IconButton(onClick = onBackClick) {
+                    IconButton(onClick = dismiss) {
                         Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                     }
                 },
@@ -200,26 +217,26 @@ fun WebViewScreen(
                         }
 
                         webViewRef = this
-                        if (url.isNotBlank()) {
-                            loadedUrl = url
+                        if (loadUrl.isNotBlank()) {
+                            loadedUrl = loadUrl
                             if (headerMap.isEmpty()) {
-                                loadUrl(url)
+                                loadUrl(loadUrl)
                             } else {
-                                loadUrl(url, headerMap)
+                                loadUrl(loadUrl, headerMap)
                             }
                         }
                     }
                 },
                 update = { webView ->
                     // Only load when the target URL actually changes (avoid reload loops)
-                    if (url.isNotBlank() && url != loadedUrl) {
-                        loadedUrl = url
+                    if (loadUrl.isNotBlank() && loadUrl != loadedUrl) {
+                        loadedUrl = loadUrl
                         pageError = null
                         isLoading = true
                         if (headerMap.isEmpty()) {
-                            webView.loadUrl(url)
+                            webView.loadUrl(loadUrl)
                         } else {
-                            webView.loadUrl(url, headerMap)
+                            webView.loadUrl(loadUrl, headerMap)
                         }
                     }
                 }

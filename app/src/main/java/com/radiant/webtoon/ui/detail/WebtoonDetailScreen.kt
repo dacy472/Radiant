@@ -56,10 +56,7 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import coil.compose.AsyncImage
-import coil.compose.SubcomposeAsyncImage
-import coil.compose.SubcomposeAsyncImageContent
-import coil.request.ImageRequest
+import coil.size.Scale
 import com.radiant.webtoon.core.database.Chapter
 import com.radiant.webtoon.core.model.Webtoon
 import com.radiant.webtoon.core.util.ChapterDates
@@ -99,42 +96,20 @@ fun WebtoonDetailScreen(
     val isFavorite by viewModel.isFavorite.collectAsStateWithLifecycle()
     val isRefreshing by viewModel.isRefreshing.collectAsStateWithLifecycle()
     val error by viewModel.error.collectAsStateWithLifecycle()
+    val selectedChapterIds by viewModel.selectedChapterIds.collectAsStateWithLifecycle()
+    val isInSelectionMode by viewModel.isInSelectionMode.collectAsStateWithLifecycle()
     var showMenu by remember { mutableStateOf(false) }
     var showTrackDialog by remember { mutableStateOf(false) }
-    var selectionMode by remember { mutableStateOf(false) }
-    var selectedChapterIds by remember { mutableStateOf(setOf<String>()) }
     var pendingDeleteChapterId by remember { mutableStateOf<String?>(null) }
-    var showBulkDeleteConfirm by remember { mutableStateOf(false) }
 
-    fun exitSelectionMode() {
-        selectionMode = false
-        selectedChapterIds = emptySet()
-    }
-
-    fun toggleSelection(chapterId: String) {
-        selectedChapterIds = if (selectedChapterIds.contains(chapterId)) {
-            selectedChapterIds - chapterId
-        } else {
-            selectedChapterIds + chapterId
-        }
-    }
-
-    fun onChapterLongPress(chapterId: String) {
-        if (!selectionMode) {
-            selectionMode = true
-            selectedChapterIds = setOf(chapterId)
-        } else {
-            toggleSelection(chapterId)
-        }
-    }
-
-    BackHandler(enabled = selectionMode) {
-        exitSelectionMode()
+    BackHandler(enabled = isInSelectionMode) {
+        viewModel.clearSelection()
     }
 
     // Bind navigation args so the ViewModel observes Room for this title.
-    // Must not call refreshFromNetwork() here — network refresh is user-initiated only.
+    // Auto-fetch for empty chapters is decided inside the ViewModel from Room flows.
     LaunchedEffect(sourceId, webtoonId) {
+        viewModel.bindContext(context)
         viewModel.loadWebtoon(sourceId, webtoonId)
     }
 
@@ -157,7 +132,7 @@ fun WebtoonDetailScreen(
         }
     }
 
-    if (pullToRefreshState.isRefreshing && !selectionMode) {
+    if (pullToRefreshState.isRefreshing && !isInSelectionMode) {
         LaunchedEffect(true) {
             viewModel.refreshFromNetwork()
         }
@@ -174,7 +149,7 @@ fun WebtoonDetailScreen(
     Scaffold(
         topBar = {
             AnimatedContent(
-                targetState = selectionMode,
+                targetState = isInSelectionMode,
                 transitionSpec = {
                     (fadeIn(animationSpec = tween(220)) + slideInVertically(animationSpec = tween(220)) { -it / 3 })
                         .togetherWith(
@@ -186,25 +161,18 @@ fun WebtoonDetailScreen(
                 if (inSelectionMode) {
                     ChapterSelectionTopBar(
                         selectedCount = selectedChapterIds.size,
-                        onClose = { exitSelectionMode() },
-                        onMarkRead = {
-                            viewModel.markChaptersRead(selectedChapterIds, true)
-                            exitSelectionMode()
-                        },
-                        onMarkUnread = {
-                            viewModel.markChaptersRead(selectedChapterIds, false)
-                            exitSelectionMode()
-                        },
+                        onClose = { viewModel.clearSelection() },
                         onDownload = {
-                            viewModel.downloadSelected(context, selectedChapterIds)
-                            Toast.makeText(
-                                context,
-                                "Queued ${selectedChapterIds.size} chapter(s)",
-                                Toast.LENGTH_SHORT,
-                            ).show()
-                            exitSelectionMode()
+                            viewModel.downloadSelected()
+                            Toast.makeText(context, "Queued selected chapter(s)", Toast.LENGTH_SHORT).show()
                         },
-                        onDelete = { showBulkDeleteConfirm = true },
+                        onMarkRead = { viewModel.markSelectedAsRead(true) },
+                        onMarkUnread = { viewModel.markSelectedAsRead(false) },
+                        onBookmark = { viewModel.bookmarkSelected(true) },
+                        onRemoveBookmarks = { viewModel.bookmarkSelected(false) },
+                        onDeleteDownloads = { viewModel.deleteSelectedDownloads() },
+                        onSelectInverse = { viewModel.invertSelection() },
+                        onSelectAll = { viewModel.selectAll() },
                     )
                 } else {
                     TopAppBar(
@@ -215,6 +183,15 @@ fun WebtoonDetailScreen(
                             }
                         },
                         actions = {
+                            IconButton(
+                                onClick = { onWebViewClick(viewModel.getMangaPageUrl()) },
+                            ) {
+                                Icon(
+                                    Icons.Default.Public,
+                                    contentDescription = "Open in WebView",
+                                    tint = Color.White,
+                                )
+                            }
                             Box {
                                 IconButton(onClick = { showMenu = true }) {
                                     Icon(Icons.Default.MoreVert, contentDescription = "More options", tint = Color.White)
@@ -270,7 +247,7 @@ fun WebtoonDetailScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .then(
-                    if (!selectionMode) {
+                    if (!isInSelectionMode) {
                         Modifier.nestedScroll(pullToRefreshState.nestedScrollConnection)
                     } else {
                         Modifier
@@ -337,16 +314,16 @@ fun WebtoonDetailScreen(
                             modifier = Modifier.animatedListRow(),
                             chapter = chapter,
                             status = downloadStatus,
-                            selectionMode = selectionMode,
+                            selectionMode = isInSelectionMode,
                             selected = selectedChapterIds.contains(chapter.url),
                             onClick = {
-                                if (selectionMode) {
-                                    toggleSelection(chapter.url)
+                                if (isInSelectionMode) {
+                                    viewModel.toggleSelection(chapter.url)
                                 } else {
                                     onChapterClick(chapter.url, chapter.name)
                                 }
                             },
-                            onLongClick = { onChapterLongPress(chapter.url) },
+                            onLongClick = { viewModel.toggleSelection(chapter.url) },
                             onDownloadClick = {
                                 when {
                                     downloadStatus == com.radiant.webtoon.core.database.DownloadStatus.COMPLETED -> {
@@ -364,7 +341,7 @@ fun WebtoonDetailScreen(
                 }
             }
 
-            if (!selectionMode) {
+            if (!isInSelectionMode) {
                 PullToRefreshContainer(
                     modifier = Modifier.align(Alignment.TopCenter),
                     state = pullToRefreshState,
@@ -400,25 +377,6 @@ fun WebtoonDetailScreen(
             },
         )
     }
-
-    if (showBulkDeleteConfirm) {
-        SpringAlertDialog(
-            onDismissRequest = { showBulkDeleteConfirm = false },
-            title = { Text("Delete downloads?") },
-            text = { Text("This will remove downloaded pages for ${selectedChapterIds.size} chapter(s) from your device.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    viewModel.deleteDownloadedChapters(selectedChapterIds)
-                    showBulkDeleteConfirm = false
-                    exitSelectionMode()
-                    Toast.makeText(context, "Downloads deleted", Toast.LENGTH_SHORT).show()
-                }) { Text("Delete") }
-            },
-            dismissButton = {
-                TextButton(onClick = { showBulkDeleteConfirm = false }) { Text("Cancel") }
-            },
-        )
-    }
 }
 
 @Composable
@@ -429,24 +387,22 @@ fun WebtoonHeader(
     parallaxY: Float = 0f,
     onToggleFavorite: () -> Unit,
 ) {
-    val context = LocalContext.current
-    val coverHeaders = rememberSourceImageHeaders(sourceId)
     var showFullCover by remember { mutableStateOf(false) }
     val coverUrl = webtoon?.thumbnail.orEmpty()
+    val coverHeaders = rememberSourceImageHeaders(sourceId = sourceId)
     Box(modifier = Modifier.fillMaxWidth().clipToBounds()) {
-        AsyncImage(
-            model = ImageRequest.Builder(context)
-                .data(webtoon?.thumbnail)
-                .headers(coverHeaders)
-                .crossfade(true)
-                .build(),
+        RadiantAsyncImage(
+            url = coverUrl,
             contentDescription = null,
+            headers = coverHeaders,
+            sourceId = sourceId,
+            scale = Scale.FILL,
+            contentScale = ContentScale.Crop,
             modifier = Modifier
                 .matchParentSize()
                 .graphicsLayer { translationY = parallaxY }
                 .blur(24.dp)
                 .alpha(0.35f),
-            contentScale = ContentScale.Crop,
         )
         Box(
             modifier = Modifier
@@ -464,22 +420,20 @@ fun WebtoonHeader(
                 .fillMaxWidth(),
             verticalAlignment = Alignment.Top,
         ) {
-            SubcomposeAsyncImage(
-                model = ImageRequest.Builder(context)
-                    .data(webtoon?.thumbnail)
-                    .headers(coverHeaders)
-                    .crossfade(true)
-                    .build(),
+            RadiantAsyncImage(
+                url = coverUrl,
                 contentDescription = "Cover",
+                headers = coverHeaders,
+                sourceId = sourceId,
+                scale = Scale.FILL,
+                contentScale = ContentScale.Crop,
                 modifier = Modifier
                     .width(110.dp)
                     .height(160.dp)
                     .shadow(8.dp, RoundedCornerShape(8.dp), clip = true)
                     .clip(RoundedCornerShape(8.dp))
                     .clickable(enabled = coverUrl.isNotBlank()) { showFullCover = true },
-                contentScale = ContentScale.Crop,
                 error = { CoverErrorPlaceholder(Modifier.fillMaxSize()) },
-                success = { SubcomposeAsyncImageContent() }
             )
             Column(
                 modifier = Modifier
@@ -564,6 +518,7 @@ fun WebtoonHeader(
         CoverViewerDialog(
             coverUrl = coverUrl,
             headers = coverHeaders,
+            sourceId = sourceId,
             onDismiss = { showFullCover = false },
         )
     }
@@ -573,6 +528,7 @@ fun WebtoonHeader(
 private fun CoverViewerDialog(
     coverUrl: String,
     headers: okhttp3.Headers,
+    sourceId: String,
     onDismiss: () -> Unit,
 ) {
     var scale by remember { mutableFloatStateOf(1f) }
@@ -631,6 +587,7 @@ private fun CoverViewerDialog(
                         translationY = offset.y
                     },
                 headers = headers,
+                sourceId = sourceId,
                 contentScale = ContentScale.Fit,
                 crossfade = true,
             )
@@ -744,16 +701,23 @@ fun WebtoonDescription(description: String?) {
 private fun ChapterSelectionTopBar(
     selectedCount: Int,
     onClose: () -> Unit,
+    onDownload: () -> Unit,
     onMarkRead: () -> Unit,
     onMarkUnread: () -> Unit,
-    onDownload: () -> Unit,
-    onDelete: () -> Unit,
+    onBookmark: () -> Unit,
+    onRemoveBookmarks: () -> Unit,
+    onDeleteDownloads: () -> Unit,
+    onSelectInverse: () -> Unit,
+    onSelectAll: () -> Unit,
 ) {
+    var showOverflow by remember { mutableStateOf(false) }
     TopAppBar(
         title = {
             Text(
-                text = if (selectedCount == 1) "1 selected" else "$selectedCount selected",
-                fontWeight = FontWeight.SemiBold,
+                text = "$selectedCount selected",
+                style = MaterialTheme.typography.titleMedium,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
             )
         },
         navigationIcon = {
@@ -762,17 +726,73 @@ private fun ChapterSelectionTopBar(
             }
         },
         actions = {
-            IconButton(onClick = onMarkRead, enabled = selectedCount > 0) {
-                Icon(Icons.Default.Done, contentDescription = "Mark as read")
-            }
-            IconButton(onClick = onMarkUnread, enabled = selectedCount > 0) {
-                Icon(Icons.Default.RemoveDone, contentDescription = "Mark as unread")
-            }
             IconButton(onClick = onDownload, enabled = selectedCount > 0) {
                 Icon(Icons.Default.Download, contentDescription = "Download selected")
             }
-            IconButton(onClick = onDelete, enabled = selectedCount > 0) {
-                Icon(Icons.Default.Delete, contentDescription = "Delete downloads")
+            IconButton(onClick = onMarkRead, enabled = selectedCount > 0) {
+                Icon(Icons.Default.DoneAll, contentDescription = "Mark as read")
+            }
+            Box {
+                IconButton(onClick = { showOverflow = true }) {
+                    Icon(Icons.Default.MoreVert, contentDescription = "More selection actions")
+                }
+                DropdownMenu(
+                    expanded = showOverflow,
+                    onDismissRequest = { showOverflow = false },
+                ) {
+                    DropdownMenuItem(
+                        text = { Text("Bookmark") },
+                        leadingIcon = { Icon(Icons.Default.BookmarkAdd, contentDescription = null) },
+                        onClick = {
+                            showOverflow = false
+                            onBookmark()
+                        },
+                        enabled = selectedCount > 0,
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Mark as Unread") },
+                        leadingIcon = { Icon(Icons.Default.RemoveDone, contentDescription = null) },
+                        onClick = {
+                            showOverflow = false
+                            onMarkUnread()
+                        },
+                        enabled = selectedCount > 0,
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Remove Bookmarks") },
+                        leadingIcon = { Icon(Icons.Default.BookmarkRemove, contentDescription = null) },
+                        onClick = {
+                            showOverflow = false
+                            onRemoveBookmarks()
+                        },
+                        enabled = selectedCount > 0,
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Delete Downloaded Chapters") },
+                        leadingIcon = { Icon(Icons.Default.Delete, contentDescription = null) },
+                        onClick = {
+                            showOverflow = false
+                            onDeleteDownloads()
+                        },
+                        enabled = selectedCount > 0,
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Select Inverse") },
+                        leadingIcon = { Icon(Icons.Default.FlipToBack, contentDescription = null) },
+                        onClick = {
+                            showOverflow = false
+                            onSelectInverse()
+                        },
+                    )
+                    DropdownMenuItem(
+                        text = { Text("Select All") },
+                        leadingIcon = { Icon(Icons.Default.SelectAll, contentDescription = null) },
+                        onClick = {
+                            showOverflow = false
+                            onSelectAll()
+                        },
+                    )
+                }
             }
         },
         colors = TopAppBarDefaults.topAppBarColors(
@@ -798,7 +818,7 @@ fun ChapterListItem(
 ) {
     val rowColor by animateColorAsState(
         targetValue = when {
-            selected -> MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.55f)
+            selected -> MaterialTheme.colorScheme.primary.copy(alpha = 0.18f)
             chapter.read -> MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.35f)
             else -> Color.Transparent
         },

@@ -24,12 +24,35 @@ import eu.kanade.tachiyomi.source.model.SChapter
  */
 class TachiyomiSourceAdapter(
     val tachiyomiSource: TachiyomiSource,
-    override val icon: String = "emoji:📦"
+    override val icon: String = "emoji:📦",
+    val defaultBaseUrl: String = when (tachiyomiSource) {
+        is HttpSource -> tachiyomiSource.baseUrl
+        else -> ""
+    },
+    baseUrlOverride: String? = null,
 ) : Source {
 
     private val tag = "TachiyomiAdapter[${tachiyomiSource.name}]"
 
     private val jsEngine: JavaScriptEngine by injectLazy()
+
+    private var baseUrlOverride: String? = baseUrlOverride?.trim()?.takeIf { it.isNotBlank() }
+
+    override val id: String = tachiyomiSource.id.toString()
+
+    override val name: String = tachiyomiSource.name
+
+    override val baseUrl: String
+        get() = BaseUrlResolver.effective(defaultBaseUrl, baseUrlOverride)
+
+    fun setBaseUrlOverride(override: String?) {
+        baseUrlOverride = override?.trim()?.takeIf { it.isNotBlank() }
+    }
+
+    fun getBaseUrlOverride(): String? = baseUrlOverride
+
+    private fun rewriteUrl(url: String): String =
+        BaseUrlResolver.rewriteUrl(url, defaultBaseUrl, baseUrl)
 
     companion object {
         /**
@@ -54,15 +77,6 @@ class TachiyomiSourceAdapter(
         )
     }
 
-    override val id: String = tachiyomiSource.id.toString()
-
-    override val name: String = tachiyomiSource.name
-
-    override val baseUrl: String = when (tachiyomiSource) {
-        is HttpSource -> tachiyomiSource.baseUrl
-        else -> ""
-    }
-
     override val lang: String = when (tachiyomiSource) {
         is CatalogueSource -> tachiyomiSource.lang
         else -> "en"
@@ -84,7 +98,7 @@ class TachiyomiSourceAdapter(
     override fun getMangaPageUrl(webtoonId: String): String {
         val manga = SManga.create().apply { url = webtoonId }
         val http = tachiyomiSource as? HttpSource
-        return if (http != null) {
+        val url = if (http != null) {
             try {
                 http.getMangaUrl(manga)
             } catch (_: Exception) {
@@ -93,6 +107,7 @@ class TachiyomiSourceAdapter(
         } else {
             super.getMangaPageUrl(webtoonId)
         }
+        return rewriteUrl(url)
     }
 
     override fun getWebViewHeaders(): Map<String, String> {
@@ -544,7 +559,7 @@ class TachiyomiSourceAdapter(
     override fun getChapterPageUrl(chapterId: String): String {
         val chapter = buildSChapter(chapterId)
         val http = tachiyomiSource as? HttpSource
-        return if (http != null) {
+        val url = if (http != null) {
             try {
                 http.getChapterUrl(chapter)
             } catch (_: Exception) {
@@ -553,6 +568,7 @@ class TachiyomiSourceAdapter(
         } else {
             super.getChapterPageUrl(chapterId)
         }
+        return rewriteUrl(url)
     }
 
     private fun isFlameComicsSource(): Boolean {

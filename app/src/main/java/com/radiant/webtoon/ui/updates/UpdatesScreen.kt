@@ -21,17 +21,16 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
-import coil.compose.SubcomposeAsyncImage
-import coil.compose.SubcomposeAsyncImageContent
-import coil.request.ImageRequest
-import com.radiant.webtoon.WebtoonApplication
-import com.radiant.webtoon.core.database.Chapter
-import com.radiant.webtoon.core.database.UpdateItem
 import com.radiant.webtoon.ui.components.CoverErrorPlaceholder
 import com.radiant.webtoon.ui.components.DownloadManagerIconButton
+import com.radiant.webtoon.ui.components.RadiantAsyncImage
 import com.radiant.webtoon.ui.components.animatedListRow
 import com.radiant.webtoon.ui.components.listItemRippleClickable
 import com.radiant.webtoon.ui.components.rememberSourceImageHeaders
+import coil.size.Scale
+import com.radiant.webtoon.WebtoonApplication
+import com.radiant.webtoon.core.database.Chapter
+import com.radiant.webtoon.core.database.UpdateItem
 import com.radiant.webtoon.core.util.ChapterDates
 import java.util.Calendar
 
@@ -180,6 +179,7 @@ fun UpdateItemRow(
     onCoverClick: () -> Unit,
     onDownloadClick: () -> Unit = {},
 ) {
+    val coverHeaders = rememberSourceImageHeaders(sourceId = item.sourceId)
     Row(
         modifier = modifier
             .fillMaxWidth()
@@ -187,22 +187,18 @@ fun UpdateItemRow(
             .padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        val coverHeaders = rememberSourceImageHeaders(item.sourceId)
-        val context = LocalContext.current
-        SubcomposeAsyncImage(
-            model = ImageRequest.Builder(context)
-                .data(item.webtoonThumbnail)
-                .headers(coverHeaders)
-                .crossfade(true)
-                .build(),
+        RadiantAsyncImage(
+            url = item.webtoonThumbnail.orEmpty(),
             contentDescription = item.webtoonTitle,
+            headers = coverHeaders,
+            sourceId = item.sourceId,
+            scale = Scale.FILL,
             contentScale = ContentScale.Crop,
             modifier = Modifier
                 .size(width = 52.dp, height = 72.dp)
                 .clip(RoundedCornerShape(6.dp))
                 .listItemRippleClickable(onClick = onCoverClick),
             error = { CoverErrorPlaceholder(Modifier.fillMaxSize()) },
-            success = { SubcomposeAsyncImageContent() },
         )
 
         Spacer(modifier = Modifier.width(12.dp))

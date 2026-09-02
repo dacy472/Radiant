@@ -27,7 +27,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.size.Precision
 import coil.size.Scale
+import com.radiant.webtoon.core.database.Manga
+import com.radiant.webtoon.core.image.SourceImageHeaders
 import com.radiant.webtoon.core.model.Webtoon
+import com.radiant.webtoon.core.source.Source
 import okhttp3.Headers
 
 /**
@@ -37,14 +40,20 @@ import okhttp3.Headers
  * which fails for sites that serve covers from a different CDN host than their `baseUrl`.
  */
 @Composable
-internal fun rememberSourceImageHeaders(sourceId: String?): Headers {
+internal fun rememberSourceImageHeaders(
+    manga: Manga? = null,
+    source: Source? = null,
+    sourceId: String? = null,
+): Headers {
     val context = LocalContext.current
-    return remember(sourceId) {
-        if (sourceId.isNullOrBlank()) return@remember Headers.headersOf()
-        val app = context.applicationContext as? com.radiant.webtoon.WebtoonApplication
-            ?: return@remember Headers.headersOf()
-        val source = app.extensionManager.getSource(sourceId) ?: return@remember Headers.headersOf()
-        com.radiant.webtoon.core.image.SourceImageHeaders.from(source)
+    val effectiveSourceId = sourceId ?: manga?.source ?: source?.id
+    return remember(manga, source, effectiveSourceId) {
+        val resolvedSource = source ?: effectiveSourceId?.let { id ->
+            (context.applicationContext as? com.radiant.webtoon.WebtoonApplication)
+                ?.extensionManager
+                ?.getSource(id)
+        }
+        SourceImageHeaders.from(resolvedSource)
     }
 }
 
@@ -103,10 +112,11 @@ fun WebtoonThumbnailCard(
     onClick: () -> Unit,
     onLongClick: (() -> Unit)? = null,
     sourceId: String? = null,
+    manga: Manga? = null,
     unreadCount: Int = 0,
     downloadedCount: Int = 0,
 ) {
-    val headers = rememberSourceImageHeaders(sourceId)
+    val coverHeaders = rememberSourceImageHeaders(manga = manga, sourceId = sourceId ?: manga?.source)
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
     val scale by animateFloatAsState(
@@ -138,7 +148,9 @@ fun WebtoonThumbnailCard(
                 url = webtoon.thumbnail,
                 contentDescription = webtoon.title,
                 modifier = Modifier.fillMaxSize(),
-                headers = headers,
+                headers = coverHeaders,
+                manga = manga,
+                sourceId = sourceId ?: manga?.source,
                 widthDp = 360,
                 heightDp = 540,
                 precision = Precision.INEXACT,

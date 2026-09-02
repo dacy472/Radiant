@@ -129,11 +129,25 @@ class WebtoonRepository(
         } catch (e: Throwable) {
             if (e is kotlinx.coroutines.CancellationException) throw e
             android.util.Log.e("GlobalSearch", "Search failed for ${source.name}", e)
-            val message = e.localizedMessage?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
-            SourceSearchResult(
-                source.id, source.name, source.icon, source.lang, emptyList(), message,
-                status = SourceSearchStatus.Error,
-            )
+            val cf = eu.kanade.tachiyomi.network.CloudflareException.unwrap(e)
+            if (cf != null) {
+                SourceSearchResult(
+                    sourceId = source.id,
+                    sourceName = source.name,
+                    sourceIcon = source.icon,
+                    sourceLang = source.lang,
+                    webtoons = emptyList(),
+                    error = "Verification needed",
+                    status = SourceSearchStatus.VerificationNeeded,
+                    challengeUrl = cf.url ?: source.baseUrl,
+                )
+            } else {
+                val message = e.localizedMessage?.takeIf { it.isNotBlank() } ?: e.javaClass.simpleName
+                SourceSearchResult(
+                    source.id, source.name, source.icon, source.lang, emptyList(), message,
+                    status = SourceSearchStatus.Error,
+                )
+            }
         }
     }
 

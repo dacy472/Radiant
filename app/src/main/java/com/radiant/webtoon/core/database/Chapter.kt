@@ -49,8 +49,19 @@ interface ChapterDao {
     @Update
     suspend fun update(chapter: Chapter)
 
+    @Transaction
+    suspend fun updateAll(chapters: List<Chapter>) {
+        chapters.forEach { update(it) }
+    }
+
     @Query("UPDATE chapters SET read = :isRead WHERE url = :url AND manga_id = :mangaId")
     suspend fun updateRead(url: String, mangaId: String, isRead: Boolean)
+
+    @Query("UPDATE chapters SET read = :isRead WHERE manga_id = :mangaId AND url IN (:urls)")
+    suspend fun updateRead(mangaId: String, urls: List<String>, isRead: Boolean)
+
+    @Query("UPDATE chapters SET bookmark = :bookmark WHERE manga_id = :mangaId AND url IN (:urls)")
+    suspend fun updateBookmark(mangaId: String, urls: List<String>, bookmark: Boolean)
 
     @Query("UPDATE chapters SET last_page_read = :lastPage WHERE url = :url AND manga_id = :mangaId")
     suspend fun updateLastPageRead(url: String, mangaId: String, lastPage: Int)

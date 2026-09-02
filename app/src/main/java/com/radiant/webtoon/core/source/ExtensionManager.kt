@@ -88,6 +88,9 @@ class ExtensionManager(
     private val _advancedMode = MutableStateFlow(false)
     private val _sourceLangs = MutableStateFlow(setOf("en"))
 
+    private val _baseUrlOverrides = MutableStateFlow<Map<String, String>>(emptyMap())
+    val baseUrlOverrides: StateFlow<Map<String, String>> = _baseUrlOverrides
+
     private companion object {
         const val DEFAULT_REPO_URL =
             "https://github.com/keiyoushi/extensions/raw/repo/index.pb"
@@ -170,6 +173,13 @@ class ExtensionManager(
                 if (_installedExtensions.value.isNotEmpty() || _installedExtensionInfos.value.isNotEmpty()) {
                     loadInstalledExtensions(force = true)
                 }
+            }
+        }
+
+        scope.launch(Dispatchers.IO) {
+            settingsManager.sourceBaseUrlOverrides.collect { overrides ->
+                _baseUrlOverrides.value = overrides
+                applyBaseUrlOverrides(overrides)
             }
         }
     }
@@ -1132,7 +1142,7 @@ class ExtensionManager(
                 } else {
                     "pkg:${extInfo.packageName}"
                 }
-                tachiyomiSources.map { tSource -> TachiyomiSourceAdapter(tSource, iconUri) }
+                tachiyomiSources.map { tSource -> wrapTachiyomiSource(tSource, iconUri) }
             }
         } catch (e: Exception) {
             Log.e(tag, "Failed to load adapters for ${extInfo.packageName}", e)
@@ -1303,7 +1313,7 @@ class ExtensionManager(
                                         "pkg:${extInfo.packageName}"
                                     }
                                     tachiyomiSources.map { tSource ->
-                                        TachiyomiSourceAdapter(tSource, iconUri) to extInfo.packageName
+                                        wrapTachiyomiSource(tSource, iconUri) to extInfo.packageName
                                     }
                                 } catch (e: Exception) {
                                     Log.e(tag, "Failed to load extension: ${extInfo.name} (${extInfo.packageName})", e)
@@ -1343,6 +1353,7 @@ class ExtensionManager(
                 )
 
                 lastLoadedFingerprint = currentFingerprint
+                refreshBaseUrlRewriteRegistry()
                 Log.i(tag, "Total sources active: ${activeSources.size} (Registry size: ${sourceRegistry.size})")
             } catch (e: Exception) {
                 Log.e(tag, "Error loading installed extensions", e)
@@ -1374,6 +1385,57 @@ class ExtensionManager(
     }
 
     fun getSourceName(sourceId: String): String? = sourceRegistry[sourceId]?.name
+
+    fun getDefaultBaseUrl(sourceId: String): String {
+        val source = sourceRegistry[sourceId] ?: return ""
+        return source.defaultBaseUrl
+    }
+
+    fun getBaseUrlOverride(sourceId: String): String? =
+        _baseUrlOverrides.value[sourceId]?.trim()?.takeIf { it.isNotBlank() }
+
+    fun effectiveBaseUrl(sourceId: String): String {
+        val source = sourceRegistry[sourceId] ?: return ""
+        return source.baseUrl
+    }
+
+    suspend fun setBaseUrlOverride(sourceId: String, url: String?) {
+        settingsManager.setSourceBaseUrlOverride(sourceId, url)
+    }
+
+    private fun applyBaseUrlOverrides(overrides: Map<String, String>) {
+        val seen = mutableSetOf<Source>()
+        for (source in sourceRegistry.values) {
+            if (!seen.add(source)) continue
+            if (source is TachiyomiSourceAdapter) {
+                source.setBaseUrlOverride(overrides[source.id])
+            }
+        }
+        for (source in _installedExtensions.value) {
+            if (!seen.add(source)) continue
+            if (source is TachiyomiSourceAdapter) {
+                source.setBaseUrlOverride(overrides[source.id])
+            }
+        }
+        refreshBaseUrlRewriteRegistry(overrides)
+        if (_installedExtensions.value.isNotEmpty()) {
+            _installedExtensions.value = _installedExtensions.value.toList()
+        }
+    }
+
+    private fun refreshBaseUrlRewriteRegistry(overrides: Map<String, String> = _baseUrlOverrides.value) {
+        val sources = sourceRegistry.values.distinctBy { it.id }
+        BaseUrlOverrideRegistry.update(BaseUrlResolver.buildHostRewriteMap(sources, overrides))
+    }
+
+    private fun wrapTachiyomiSource(tSource: TachiyomiSource, iconUri: String): TachiyomiSourceAdapter {
+        val sourceId = tSource.id.toString()
+        return TachiyomiSourceAdapter(
+            tachiyomiSource = tSource,
+            icon = iconUri,
+            baseUrlOverride = getBaseUrlOverride(sourceId),
+        )
+    }
 
     fun getAllSources(): List<Source> {
         return ExtensionAllowlist.dedupeSourcesBySlugPreferEn(

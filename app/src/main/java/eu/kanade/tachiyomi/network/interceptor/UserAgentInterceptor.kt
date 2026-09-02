@@ -22,7 +22,8 @@ open class UserAgentInterceptor(
         }
 
     override fun intercept(chain: Interceptor.Chain): Response {
-        val ua = defaultUserAgentProvider().ifBlank { userAgent }.ifBlank { FALLBACK_USER_AGENT }
+        // Prefer the pinned [userAgent] (settings sync + Cloudflare WebView bypass).
+        val ua = userAgent.ifBlank { defaultUserAgentProvider() }.ifBlank { FALLBACK_USER_AGENT }
         if (ua != userAgent) userAgent = ua
         val request = chain.request().newBuilder()
             .header("User-Agent", ua)

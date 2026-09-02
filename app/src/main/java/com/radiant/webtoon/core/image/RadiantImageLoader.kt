@@ -12,7 +12,7 @@ import okhttp3.OkHttpClient
 /** Disk-first image cache sizing for webtoon pages and cover thumbnails. */
 object RadiantImageLoader {
     const val MEMORY_CACHE_MAX_SIZE_PERCENT = 0.10
-    const val DISK_CACHE_MAX_SIZE_BYTES = 250L * 1024 * 1024
+    const val DISK_CACHE_MAX_SIZE_BYTES = 256L * 1024 * 1024
 
     fun build(
         context: Context,
@@ -21,6 +21,8 @@ object RadiantImageLoader {
     ): ImageLoader {
         return ImageLoader.Builder(context)
             .okHttpClient(okHttpClient)
+            // Ignore CDN Cache-Control (no-store, max-age=0) so covers stay on disk for Library/History.
+            .respectCacheHeaders(false)
             .fetcherDispatcher(Dispatchers.IO.limitedParallelism(3))
             .decoderDispatcher(Dispatchers.Default.limitedParallelism(3))
             .memoryCache {

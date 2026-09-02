@@ -9,25 +9,36 @@ import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import java.util.concurrent.ConcurrentHashMap
 
 /**
- * OkHttp [CookieJar] fully backed by [android.webkit.CookieManager].
+ * OkHttp [CookieJar] bridged directly to [android.webkit.CookieManager].
  *
- * WebView Cloudflare solves write `cf_clearance` into CookieManager; every OkHttp call
- * (HTML and image CDNs) reads that same store. Cloudflare cookies are also indexed in
- * memory so [CloudflareCookieInterceptor] can attach them to cross-origin CDN requests
- * that CookieManager would not match by domain.
+ * WebView Cloudflare solves write `cf_clearance` into CookieManager; OkHttp reads and
+ * writes the same store. Cloudflare cookies are also indexed in memory so
+ * [CloudflareCookieInterceptor] can attach them to cross-origin CDN requests that
+ * CookieManager would not match by domain alone.
  */
 class AndroidCookieJar(
-    @Suppress("UNUSED_PARAMETER") context: Context? = null,
+    @Suppress("UNUSED_PARAMETER") context: Context,
 ) : CookieJar {
 
-    private val manager: CookieManager = CookieManager.getInstance().also { jar ->
-        jar.setAcceptCookie(true)
+    private val cookieManager: CookieManager = CookieManager.getInstance().also { manager ->
+        manager.setAcceptCookie(true)
     }
 
     private val cloudflareByHost = ConcurrentHashMap<String, Map<String, Cookie>>()
 
+    override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
+        if (cookies.isEmpty()) return
+        synchronized(cookieManager) {
+            for (cookie in cookies) {
+                cookieManager.setCookie(url.toString(), cookie.toString())
+            }
+            flush()
+        }
+        indexCloudflare(url, cookies)
+    }
+
     override fun loadForRequest(url: HttpUrl): List<Cookie> {
-        val fromManager = get(url)
+        val fromManager = loadCookiesFromManager(url)
         indexCloudflare(url, fromManager)
         val extra = cloudflareCookies(url)
         if (extra.isEmpty()) return fromManager
@@ -35,30 +46,14 @@ class AndroidCookieJar(
         return fromManager + extra.filter { it.name.lowercase() !in names }
     }
 
-    override fun saveFromResponse(url: HttpUrl, cookies: List<Cookie>) {
-        if (cookies.isEmpty()) return
-        synchronized(manager) {
-            for (cookie in cookies) {
-                val target = cookieTargetUrl(url, cookie)
-                manager.setCookie(target, cookie.toString())
-            }
-            flush()
-        }
-        indexCloudflare(url, cookies)
-    }
-
-    fun get(url: HttpUrl): List<Cookie> {
-        return try {
-            val raw = synchronized(manager) { manager.getCookie(url.toString()) } ?: return emptyList()
-            parseCookieHeader(url, raw)
-        } catch (_: Exception) {
-            emptyList()
-        }
-    }
+    /** Read all cookies CookieManager holds for [url], parsed as OkHttp [Cookie] instances. */
+    fun get(url: HttpUrl): List<Cookie> = loadCookiesFromManager(url)
 
     fun getCookieHeader(url: HttpUrl): String? {
         return try {
-            synchronized(manager) { manager.getCookie(url.toString()) }?.takeIf { it.isNotBlank() }
+            synchronized(cookieManager) {
+                cookieManager.getCookie(url.toString())?.takeIf { it.isNotBlank() }
+            }
         } catch (_: Exception) {
             null
         }
@@ -77,16 +72,15 @@ class AndroidCookieJar(
         if (hostOrigin != null && hostOrigin != url) {
             saveFromResponse(hostOrigin, cookies)
         }
-        // Also write host-only CF cookies onto the registrable domain so subdomains see them.
         val root = CloudflareCookiePropagation.registrableDomain(url.host)
         if (root.isNotBlank() && !root.equals(url.host, ignoreCase = true)) {
             val rootUrl = "https://$root/".toHttpUrlOrNull()
             if (rootUrl != null) {
                 val cf = CloudflareCookiePropagation.cloudflareOnly(cookies)
                 if (cf.isNotEmpty()) {
-                    synchronized(manager) {
+                    synchronized(cookieManager) {
                         cf.forEach { cookie ->
-                            manager.setCookie(
+                            cookieManager.setCookie(
                                 rootUrl.toString(),
                                 "${cookie.name}=${cookie.value}; Path=/; Domain=.$root; Secure",
                             )
@@ -108,17 +102,17 @@ class AndroidCookieJar(
         }
         take(url.host)
         take(CloudflareCookiePropagation.registrableDomain(url.host))
-        CloudflareCookiePropagation.cloudflareOnly(get(url)).forEach { cookie ->
+        CloudflareCookiePropagation.cloudflareOnly(loadCookiesFromManager(url)).forEach { cookie ->
             merged.putIfAbsent(cookie.name.lowercase(), cookie)
         }
         return merged.values.toList()
     }
 
     fun remove(url: HttpUrl, cookieNames: List<String>? = null) {
-        synchronized(manager) {
-            for (cookie in get(url)) {
+        synchronized(cookieManager) {
+            for (cookie in loadCookiesFromManager(url)) {
                 if (cookieNames != null && cookie.name !in cookieNames) continue
-                manager.setCookie(
+                cookieManager.setCookie(
                     url.toString(),
                     "${cookie.name}=; Max-Age=0; Path=${cookie.path}",
                 )
@@ -138,13 +132,24 @@ class AndroidCookieJar(
 
     fun clear() {
         try {
-            synchronized(manager) {
-                manager.removeAllCookies(null)
+            synchronized(cookieManager) {
+                cookieManager.removeAllCookies(null)
                 flush()
             }
             cloudflareByHost.clear()
         } catch (_: Exception) {
             // Best-effort
+        }
+    }
+
+    private fun loadCookiesFromManager(url: HttpUrl): List<Cookie> {
+        return try {
+            val raw = synchronized(cookieManager) {
+                cookieManager.getCookie(url.toString())
+            } ?: return emptyList()
+            parseCookieHeader(url, raw)
+        } catch (_: Exception) {
+            emptyList()
         }
     }
 
@@ -168,18 +173,11 @@ class AndroidCookieJar(
         store(CloudflareCookiePropagation.registrableDomain(url.host))
     }
 
-    private fun cookieTargetUrl(requestUrl: HttpUrl, cookie: Cookie): String {
-        val domain = cookie.domain.trim('.').ifBlank { requestUrl.host }
-        val scheme = if (requestUrl.isHttps) "https" else "http"
-        val path = cookie.path.ifBlank { "/" }
-        return "$scheme://$domain$path"
-    }
-
     private fun flush() {
         try {
-            manager.flush()
+            cookieManager.flush()
         } catch (_: Exception) {
-            // flush is best-effort
+            // Best-effort
         }
     }
 }

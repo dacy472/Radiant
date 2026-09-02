@@ -19,9 +19,12 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
-import coil.compose.AsyncImage
 import com.radiant.webtoon.core.database.Manga
 import com.radiant.webtoon.core.repository.WebtoonRepository
+import com.radiant.webtoon.ui.components.CoverErrorPlaceholder
+import com.radiant.webtoon.ui.components.RadiantAsyncImage
+import com.radiant.webtoon.ui.components.rememberSourceImageHeaders
+import coil.size.Scale
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -80,6 +83,7 @@ fun MigrationListScreen(
 
 @Composable
 fun MigrationMangaCard(manga: Manga, onClick: () -> Unit) {
+    val coverHeaders = rememberSourceImageHeaders(manga = manga)
     Card(
         modifier = Modifier
             .fillMaxWidth()
@@ -87,13 +91,17 @@ fun MigrationMangaCard(manga: Manga, onClick: () -> Unit) {
         elevation = CardDefaults.cardElevation(defaultElevation = 2.dp)
     ) {
         Column {
-            AsyncImage(
-                model = manga.thumbnail_url,
+            RadiantAsyncImage(
+                url = manga.thumbnail_url.orEmpty(),
                 contentDescription = null,
+                headers = coverHeaders,
+                manga = manga,
+                scale = Scale.FILL,
+                contentScale = ContentScale.Crop,
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(180.dp),
-                contentScale = ContentScale.Crop
+                error = { CoverErrorPlaceholder(Modifier.fillMaxSize()) },
             )
             Text(
                 text = manga.title,

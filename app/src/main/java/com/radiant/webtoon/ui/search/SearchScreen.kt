@@ -25,9 +25,11 @@ fun SearchScreen(
     repository: com.radiant.webtoon.core.repository.WebtoonRepository,
     onWebtoonClick: (String, String) -> Unit, // sourceId, webtoonId
     onBrowseClick: (String) -> Unit, // sourceId
+    onWebViewClick: (String, String) -> Unit = { _, _ -> }, // sourceId, url
     initialQuery: String? = null,
     migrateFromMangaId: String? = null,
-    onMigrationComplete: () -> Unit = {}
+    migrateFromSourceId: String? = null,
+    onMigrationComplete: (newSourceId: String, newWebtoonId: String) -> Unit = { _, _ -> }
 ) {
     val viewModel: GlobalSearchViewModel = viewModel(factory = object : androidx.lifecycle.ViewModelProvider.Factory {
         override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T {
@@ -51,16 +53,10 @@ fun SearchScreen(
     })
     val isMigrating by migrationViewModel.isMigrating.collectAsState()
 
-    androidx.compose.runtime.LaunchedEffect(initialQuery) {
+    androidx.compose.runtime.LaunchedEffect(initialQuery, migrateFromMangaId, migrateFromSourceId) {
         if (initialQuery != null) {
-            val manga = if (migrateFromMangaId != null) {
-                repository.mangaDao.getManga(migrateFromMangaId, "") 
-                null 
-            } else null
-            
-            // Re-fetch the specific manga if migrating
-            val targetManga = if (migrateFromMangaId != null) {
-                repository.mangaDao.getFavorites().find { it.url == migrateFromMangaId }
+            val targetManga = if (migrateFromMangaId != null && migrateFromSourceId != null) {
+                repository.mangaDao.getManga(migrateFromMangaId, migrateFromSourceId)
             } else null
 
             viewModel.setInitialQuery(initialQuery, targetManga)
@@ -150,7 +146,11 @@ fun SearchScreen(
             val displaySources = searchableSources.filter { source ->
                 if (filterHasResults) {
                     val sourceResult = results.find { it.sourceId == source.id }
-                    if (sourceResult == null || sourceResult.webtoons.isEmpty() || sourceResult.status == SourceSearchStatus.Error) {
+                    if (sourceResult == null ||
+                        sourceResult.webtoons.isEmpty() ||
+                        sourceResult.status == SourceSearchStatus.Error ||
+                        sourceResult.status == SourceSearchStatus.VerificationNeeded
+                    ) {
                         return@filter false
                     }
                 }
@@ -225,17 +225,30 @@ fun SearchScreen(
 
                             if (query.length >= 2) {
                                 if (sourceResult != null) {
-                                    if (sourceResult.webtoons.isEmpty() && !isSourceLoading) {
-                                        // ── No results / error per source ──
-                                        Text(
-                                            text = sourceResult.error ?: "No results found",
-                                            style = MaterialTheme.typography.bodySmall,
-                                            modifier = Modifier.padding(start = 16.dp, bottom = 12.dp),
-                                            color = if (sourceResult.error != null)
-                                                MaterialTheme.colorScheme.error
-                                            else
-                                                MaterialTheme.colorScheme.outline
+                                    if (sourceResult.status == SourceSearchStatus.VerificationNeeded) {
+                                        SourceInlineChallengeRow(
+                                            message = sourceResult.error ?: "Verification needed",
+                                            onSolveInWebView = {
+                                                val url = sourceResult.challengeUrl
+                                                    ?: source.baseUrl.takeIf { it.isNotBlank() }
+                                                    ?: return@SourceInlineChallengeRow
+                                                onWebViewClick(source.id, url)
+                                            },
                                         )
+                                    } else if (sourceResult.webtoons.isEmpty() && !isSourceLoading) {
+                                        // ── No results / error per source ──
+                                        if (sourceResult.status == SourceSearchStatus.Error) {
+                                            SourceInlineErrorRow(
+                                                message = sourceResult.error ?: "Failed to load",
+                                            )
+                                        } else {
+                                            Text(
+                                                text = sourceResult.error ?: "No results found",
+                                                style = MaterialTheme.typography.bodySmall,
+                                                modifier = Modifier.padding(start = 16.dp, bottom = 12.dp),
+                                                color = MaterialTheme.colorScheme.outline,
+                                            )
+                                        }
                                     } else if (sourceResult.webtoons.isNotEmpty()) {
                                         // ── Horizontal carousel of manga cards (Mihon-style) ──
                                         LazyRow(
@@ -285,13 +298,20 @@ fun SearchScreen(
             AlertDialog(
                 onDismissRequest = { showMigrationDialog = null },
                 title = { Text("Confirm Migration") },
-                text = { Text("Migrate '${migrateFromManga?.title}' to '${targetWebtoon.title}' on $targetSourceId?\nThis will transfer your reading progress.") },
+                text = {
+                    val sourceName = repository.extensionManager.getSource(targetSourceId)?.name ?: targetSourceId
+                    Text(
+                        "Migrate '${migrateFromManga?.title}' to '${targetWebtoon.title}' on $sourceName?\n" +
+                            "This will transfer your reading progress."
+                    )
+                },
                 confirmButton = {
                     Button(onClick = {
                         val oldManga = migrateFromManga ?: return@Button
                         migrationViewModel.migrateWebtoon(oldManga, targetWebtoon, targetSourceId) {
                             showMigrationDialog = null
-                            onMigrationComplete()
+                            val newWebtoonId = targetWebtoon.url?.takeIf { it.isNotBlank() } ?: targetWebtoon.id
+                            onMigrationComplete(targetSourceId, newWebtoonId)
                         }
                     }) {
                         Text("Migrate")
@@ -323,6 +343,51 @@ fun SearchScreen(
 }
 
 
+
+@Composable
+private fun SourceInlineChallengeRow(
+    message: String,
+    onSolveInWebView: () -> Unit,
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween,
+    ) {
+        Surface(
+            color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f),
+            shape = MaterialTheme.shapes.small,
+        ) {
+            Text(
+                text = message,
+                style = MaterialTheme.typography.labelMedium,
+                color = MaterialTheme.colorScheme.onSecondaryContainer,
+                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+            )
+        }
+        TextButton(onClick = onSolveInWebView, contentPadding = PaddingValues(horizontal = 8.dp)) {
+            Text("Solve in WebView")
+        }
+    }
+}
+
+@Composable
+private fun SourceInlineErrorRow(message: String) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .padding(start = 16.dp, end = 16.dp, bottom = 12.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text(
+            text = message,
+            style = MaterialTheme.typography.bodySmall,
+            color = MaterialTheme.colorScheme.error,
+        )
+    }
+}
 
 @Composable
 fun NoSourcesInstalled(onRefresh: () -> Unit) {

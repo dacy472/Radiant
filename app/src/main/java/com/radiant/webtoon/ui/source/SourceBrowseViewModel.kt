@@ -133,9 +133,19 @@ class SourceBrowseViewModel(
                         return@launch
                     }
                 }
+                val cf = eu.kanade.tachiyomi.network.CloudflareException.unwrap(e)
+                val errorState = if (cf != null) {
+                    BrowseState.Error(
+                        message = "Verification needed",
+                        isCloudflareChallenge = true,
+                        challengeUrl = cf.url ?: getSourceBaseUrl().takeIf { it.isNotBlank() },
+                    )
+                } else {
+                    BrowseState.Error(e.message ?: "Failed to load")
+                }
                 // Keep previously loaded pages; only show error when the first page fails
                 if (_webtoons.value.isEmpty()) {
-                    _state.value = BrowseState.Error(e.message ?: "Unknown error")
+                    _state.value = errorState
                 } else {
                     _state.value = BrowseState.Success
                 }
@@ -176,6 +186,10 @@ class SourceBrowseViewModel(
 
     fun getSourceName(): String = source?.name ?: "Browse"
 
+    fun getSourceBaseUrl(): String = source?.baseUrl?.trim().orEmpty().ifBlank {
+        extensionManager.getSource(sourceId)?.baseUrl?.trim().orEmpty()
+    }
+
     private fun isSerializationFailure(error: Throwable): Boolean {
         var current: Throwable? = error
         while (current != null) {
@@ -193,5 +207,9 @@ internal fun Webtoon.identityKey(): String =
 sealed class BrowseState {
     object Loading : BrowseState()
     object Success : BrowseState()
-    data class Error(val message: String) : BrowseState()
+    data class Error(
+        val message: String,
+        val isCloudflareChallenge: Boolean = false,
+        val challengeUrl: String? = null,
+    ) : BrowseState()
 }

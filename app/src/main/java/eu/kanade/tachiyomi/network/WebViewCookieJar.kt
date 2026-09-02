@@ -1,5 +1,6 @@
 package eu.kanade.tachiyomi.network
 
+import android.content.Context
 import okhttp3.CookieJar
 
 /**
@@ -7,6 +8,6 @@ import okhttp3.CookieJar
  */
 @Deprecated(
     message = "Use AndroidCookieJar — it syncs with android.webkit.CookieManager",
-    replaceWith = ReplaceWith("AndroidCookieJar()"),
+    replaceWith = ReplaceWith("AndroidCookieJar(context)"),
 )
-class WebViewCookieJar : CookieJar by AndroidCookieJar()
+class WebViewCookieJar(context: Context) : CookieJar by AndroidCookieJar(context)

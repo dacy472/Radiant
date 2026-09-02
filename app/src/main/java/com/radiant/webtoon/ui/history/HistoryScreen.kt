@@ -16,14 +16,17 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import coil.size.Scale
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
-import coil.compose.AsyncImage
 import com.radiant.webtoon.WebtoonApplication
 import com.radiant.webtoon.core.repository.WebtoonRepository
+import com.radiant.webtoon.ui.components.CoverErrorPlaceholder
 import com.radiant.webtoon.ui.components.DownloadManagerIconButton
+import com.radiant.webtoon.ui.components.RadiantAsyncImage
 import com.radiant.webtoon.ui.components.animatedListRow
 import com.radiant.webtoon.ui.components.listItemRippleClickable
+import com.radiant.webtoon.ui.components.rememberSourceImageHeaders
 import com.radiant.webtoon.ui.components.SpringAlertDialog
 import java.text.SimpleDateFormat
 import java.util.*
@@ -147,6 +150,7 @@ fun HistoryItemRow(
     onClick: () -> Unit,
     onCoverClick: () -> Unit,
 ) {
+    val coverHeaders = rememberSourceImageHeaders(sourceId = item.sourceId)
     Column(modifier = modifier) {
         Row(
             modifier = Modifier
@@ -155,14 +159,18 @@ fun HistoryItemRow(
                 .padding(horizontal = 16.dp, vertical = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            AsyncImage(
-                model = item.webtoonThumbnail,
+            RadiantAsyncImage(
+                url = item.webtoonThumbnail.orEmpty(),
                 contentDescription = "Cover",
+                headers = coverHeaders,
+                sourceId = item.sourceId,
+                scale = Scale.FILL,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier
                     .size(width = 48.dp, height = 64.dp)
                     .clip(RoundedCornerShape(8.dp))
                     .listItemRippleClickable(onClick = onCoverClick),
+                error = { CoverErrorPlaceholder(Modifier.fillMaxSize()) },
             )
 
             Spacer(modifier = Modifier.width(16.dp))

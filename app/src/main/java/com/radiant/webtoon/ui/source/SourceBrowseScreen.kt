@@ -11,6 +11,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.FilterList
+import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
@@ -35,7 +36,8 @@ fun SourceBrowseScreen(
     extensionManager: ExtensionManager,
     sourceId: String,
     onWebtoonClick: (String, String) -> Unit,
-    onBackClick: () -> Unit
+    onBackClick: () -> Unit,
+    onWebViewClick: (String) -> Unit = {},
 ) {
     val viewModel: SourceBrowseViewModel = viewModel(factory = object : androidx.lifecycle.ViewModelProvider.Factory {
         override fun <T : androidx.lifecycle.ViewModel> create(modelClass: Class<T>): T {
@@ -46,6 +48,7 @@ fun SourceBrowseScreen(
     val state by viewModel.state.collectAsState()
     val webtoons by viewModel.webtoons.collectAsState()
     val selectedTab by viewModel.selectedTab.collectAsState()
+    val sourceBaseUrl = remember(sourceId, state) { viewModel.getSourceBaseUrl() }
     val gridState = rememberLazyGridState()
 
     var searchQuery by remember { mutableStateOf("") }
@@ -78,6 +81,12 @@ fun SourceBrowseScreen(
                     }
                 },
                 actions = {
+                    IconButton(
+                        onClick = { onWebViewClick(sourceBaseUrl) },
+                        enabled = sourceBaseUrl.isNotBlank(),
+                    ) {
+                        Icon(Icons.Default.Public, contentDescription = "Open in WebView")
+                    }
                     if (selectedTab == BrowseTab.SEARCH) {
                         IconButton(onClick = { showFilters = true }) {
                             Icon(Icons.Default.FilterList, contentDescription = "Filters")
@@ -167,6 +176,7 @@ fun SourceBrowseScreen(
                         }
                     }
                     state is BrowseState.Error && webtoons.isEmpty() -> {
+                        val errorState = state as BrowseState.Error
                         Column(
                             modifier = Modifier
                                 .fillMaxSize()
@@ -174,13 +184,35 @@ fun SourceBrowseScreen(
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.Center
                         ) {
-                            Text(
-                                text = (state as BrowseState.Error).message,
-                                style = MaterialTheme.typography.bodyLarge,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Spacer(Modifier.height(16.dp))
-                            Button(onClick = { viewModel.refresh() }) {
+                            if (errorState.isCloudflareChallenge) {
+                                Surface(
+                                    color = MaterialTheme.colorScheme.secondaryContainer.copy(alpha = 0.6f),
+                                    shape = MaterialTheme.shapes.small,
+                                ) {
+                                    Text(
+                                        text = errorState.message,
+                                        style = MaterialTheme.typography.labelLarge,
+                                        color = MaterialTheme.colorScheme.onSecondaryContainer,
+                                        modifier = Modifier.padding(horizontal = 12.dp, vertical = 8.dp),
+                                    )
+                                }
+                                Spacer(Modifier.height(16.dp))
+                                val challengeUrl = errorState.challengeUrl
+                                if (!challengeUrl.isNullOrBlank()) {
+                                    Button(onClick = { onWebViewClick(challengeUrl) }) {
+                                        Text("Solve in WebView")
+                                    }
+                                    Spacer(Modifier.height(8.dp))
+                                }
+                            } else {
+                                Text(
+                                    text = errorState.message,
+                                    style = MaterialTheme.typography.bodyLarge,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                                Spacer(Modifier.height(16.dp))
+                            }
+                            OutlinedButton(onClick = { viewModel.refresh() }) {
                                 Text("Retry")
                             }
                         }

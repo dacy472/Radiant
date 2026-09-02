@@ -11,6 +11,8 @@ enum class SourceSearchStatus {
     Loading,
     Success,
     Error,
+    /** Cloudflare challenge — show inline "Solve in WebView", no app-wide modal. */
+    VerificationNeeded,
 }
 
 data class SourceSearchResult(
@@ -23,6 +25,7 @@ data class SourceSearchResult(
     @SerializedName("hasNextPage") val hasNextPage: Boolean = false,
     @SerializedName("currentPage") val currentPage: Int = 1,
     @SerializedName("status") val status: SourceSearchStatus = SourceSearchStatus.Idle,
+    @SerializedName("challengeUrl") val challengeUrl: String? = null,
 )
 
 data class PagedWebtoonResponse(

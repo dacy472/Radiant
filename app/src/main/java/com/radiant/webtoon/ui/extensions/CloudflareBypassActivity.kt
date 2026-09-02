@@ -4,10 +4,14 @@ import android.annotation.SuppressLint
 import android.graphics.Color
 import android.graphics.drawable.ColorDrawable
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
 import android.webkit.WebSettings
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
 import android.webkit.WebViewClient
 import android.widget.Toast
@@ -27,11 +31,14 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import com.radiant.webtoon.ui.theme.WebtoonTheme
+import com.radiant.webtoon.ui.webview.WebViewUrlNormalizer
 import eu.kanade.tachiyomi.network.NetworkHelper
+import eu.kanade.tachiyomi.network.WebViewResourceFetcher
 import eu.kanade.tachiyomi.network.interceptor.CloudflareBypassGate
 import eu.kanade.tachiyomi.network.interceptor.CloudflareChallengeDetector
 import eu.kanade.tachiyomi.network.interceptor.CloudflareInterceptor
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.HttpUrl.Companion.toHttpUrlOrNull
 import uy.kohesive.injekt.injectLazy
 
 /**
@@ -44,6 +51,24 @@ class CloudflareBypassActivity : ComponentActivity() {
     private val networkHelper: NetworkHelper by injectLazy()
     private var webView: WebView? = null
     private var finished = false
+    private val cookiePollHandler = Handler(Looper.getMainLooper())
+    private var oldClearance: String? = null
+    private var challengeUrl: String = ""
+
+    private val cookiePollRunnable = object : Runnable {
+        override fun run() {
+            if (finished) return
+            val cookies = CookieManager.getInstance().getCookie(challengeUrl)
+                ?: challengeUrl.toHttpUrlOrNull()?.let { http ->
+                    CookieManager.getInstance().getCookie("${http.scheme}://${http.host}/")
+                }
+            if (CloudflareChallengeDetector.hasNewClearance(cookies, oldClearance)) {
+                finishWithResult(success = true)
+                return
+            }
+            cookiePollHandler.postDelayed(this, COOKIE_POLL_MS)
+        }
+    }
 
     @OptIn(ExperimentalMaterial3Api::class)
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -54,14 +79,17 @@ class CloudflareBypassActivity : ComponentActivity() {
             WindowManager.LayoutParams.MATCH_PARENT,
         )
 
-        val url = intent.getStringExtra(EXTRA_URL) ?: "https://google.com"
+        val url = WebViewUrlNormalizer.normalizeForCloudflareClearance(
+            intent.getStringExtra(EXTRA_URL) ?: "https://google.com",
+        )
+        challengeUrl = url
         val host = intent.getStringExtra(EXTRA_NAME) ?: url
         val userAgent = intent.getStringExtra(EXTRA_USER_AGENT)
             ?: networkHelper.defaultUserAgentProvider()
         val referer = intent.getStringExtra(EXTRA_REFERER)
             ?.takeIf { it.isNotBlank() }
             ?: CloudflareInterceptor.originReferer(url)
-        val oldClearance = intent.getStringExtra(EXTRA_OLD_CLEARANCE)
+        oldClearance = intent.getStringExtra(EXTRA_OLD_CLEARANCE)
         if (intent.getBooleanExtra(EXTRA_SHOW_TOAST, false)) {
             Toast.makeText(this, CloudflareInterceptor.TOAST_MESSAGE, Toast.LENGTH_LONG).show()
         }
@@ -96,6 +124,7 @@ class CloudflareBypassActivity : ComponentActivity() {
                 }
             }
         }
+        cookiePollHandler.postDelayed(cookiePollRunnable, COOKIE_POLL_MS)
     }
 
     @SuppressLint("SetJavaScriptEnabled")
@@ -124,6 +153,17 @@ class CloudflareBypassActivity : ComponentActivity() {
                         userAgentString = userAgent
                     }
                     webViewClient = object : WebViewClient() {
+                        override fun shouldInterceptRequest(
+                            view: WebView,
+                            request: WebResourceRequest,
+                        ): WebResourceResponse? {
+                            WebViewResourceFetcher.interceptGet(
+                                networkHelper.webViewResourceClient,
+                                request,
+                            )?.let { return it }
+                            return super.shouldInterceptRequest(view, request)
+                        }
+
                         override fun onPageFinished(view: WebView?, finishedUrl: String?) {
                             super.onPageFinished(view, finishedUrl)
                             val manager = CookieManager.getInstance()
@@ -152,8 +192,9 @@ class CloudflareBypassActivity : ComponentActivity() {
     private fun finishWithResult(success: Boolean) {
         if (finished) return
         finished = true
+        cookiePollHandler.removeCallbacks(cookiePollRunnable)
 
-        val url = intent.getStringExtra(EXTRA_URL)
+        val url = challengeUrl
         val userAgent = webView?.settings?.userAgentString
             ?: intent.getStringExtra(EXTRA_USER_AGENT)
             ?: networkHelper.defaultUserAgentProvider()
@@ -179,12 +220,14 @@ class CloudflareBypassActivity : ComponentActivity() {
         try {
             val rawCookies = CookieManager.getInstance().getCookie(url) ?: return
             networkHelper.cookieJar.syncFromWebView(url.toHttpUrl(), rawCookies)
+            CookieManager.getInstance().flush()
         } catch (_: Exception) {
             // Best-effort cookie bridge
         }
     }
 
     override fun onDestroy() {
+        cookiePollHandler.removeCallbacks(cookiePollRunnable)
         if (!finished) {
             CloudflareBypassGate.complete(CloudflareBypassGate.BypassResult(success = false))
         }
@@ -200,5 +243,6 @@ class CloudflareBypassActivity : ComponentActivity() {
         const val EXTRA_REFERER = "referer"
         const val EXTRA_OLD_CLEARANCE = "old_clearance"
         const val EXTRA_SHOW_TOAST = "show_toast"
+        private const val COOKIE_POLL_MS = 400L
     }
 }

@@ -10,7 +10,6 @@ import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
 import android.util.Log
-import kotlinx.coroutines.flow.map
 import kotlinx.coroutines.flow.stateIn
 import kotlinx.coroutines.flow.update
 import com.radiant.webtoon.core.database.Manga
@@ -37,10 +36,18 @@ class GlobalSearchViewModel(private val repository: WebtoonRepository) : ViewMod
     private val _isSearching = MutableStateFlow(false)
     val isSearching: StateFlow<Boolean> = _isSearching
 
-    /** Installed sources that are pinned/enabled for global search. */
-    val searchableSources = repository.extensionManager.installedExtensions
-        .map { _ -> repository.extensionManager.getAllSources().filter { it.isPinned } }
-        .stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Lazily, emptyList())
+    /** Installed sources shown in search; migration mode searches all other installed sources. */
+    val searchableSources = kotlinx.coroutines.flow.combine(
+        repository.extensionManager.installedExtensions,
+        _migrateFromManga,
+    ) { _, migrateFrom ->
+        val allInstalled = repository.extensionManager.getAllSources()
+        if (migrateFrom != null) {
+            allInstalled.filter { it.id != migrateFrom.source }
+        } else {
+            allInstalled.filter { it.isPinned }
+        }
+    }.stateIn(viewModelScope, kotlinx.coroutines.flow.SharingStarted.Lazily, emptyList())
 
     private val _installedCount = MutableStateFlow(0)
     val installedCount: StateFlow<Int> = _installedCount
@@ -118,13 +125,22 @@ class GlobalSearchViewModel(private val repository: WebtoonRepository) : ViewMod
         _error.value = null
 
         try {
-            var sources = repository.extensionManager.getAllSources().filter { it.isPinned }
-            Log.d("GlobalSearchViewModel", "Pinned sources before reload: ${sources.size}")
+            val migrateFrom = _migrateFromManga.value
+            var sources = if (migrateFrom != null) {
+                repository.extensionManager.getAllSources().filter { it.id != migrateFrom.source }
+            } else {
+                repository.extensionManager.getAllSources().filter { it.isPinned }
+            }
+            Log.d("GlobalSearchViewModel", "Search sources before reload: ${sources.size}")
 
             if (sources.isEmpty()) {
                 repository.extensionManager.refreshSources()
-                sources = repository.extensionManager.getAllSources().filter { it.isPinned }
-                Log.d("GlobalSearchViewModel", "Pinned sources after reload: ${sources.size}")
+                sources = if (migrateFrom != null) {
+                    repository.extensionManager.getAllSources().filter { it.id != migrateFrom.source }
+                } else {
+                    repository.extensionManager.getAllSources().filter { it.isPinned }
+                }
+                Log.d("GlobalSearchViewModel", "Search sources after reload: ${sources.size}")
             }
 
             if (sources.isEmpty()) {
@@ -132,6 +148,8 @@ class GlobalSearchViewModel(private val repository: WebtoonRepository) : ViewMod
                 val installedCount = repository.extensionManager.getAllSources().size
                 _error.value = if (installedCount == 0) {
                     "No extensions installed. Go to Browse to add some."
+                } else if (migrateFrom != null) {
+                    "No other installed sources to migrate to."
                 } else {
                     "No pinned sources. Pin extensions in Browse to search them."
                 }
@@ -160,13 +178,20 @@ class GlobalSearchViewModel(private val repository: WebtoonRepository) : ViewMod
             val results = _searchResults.value.values.toList()
             val successfulResults = results.filter { it.webtoons.isNotEmpty() }
             val sourceErrors = results.filter { it.status == SourceSearchStatus.Error }
+            val verificationNeeded = results.filter { it.status == SourceSearchStatus.VerificationNeeded }
 
             if (successfulResults.isEmpty()) {
-                if (sourceErrors.isNotEmpty()) {
-                    val errorSummary = sourceErrors.joinToString("\n") { "${it.sourceName}: ${it.error}" }
-                    _error.value = "Search failed across all sources:\n$errorSummary"
-                } else {
-                    _error.value = "No results found."
+                when {
+                    verificationNeeded.isNotEmpty() && sourceErrors.isEmpty() -> {
+                        _error.value = null
+                    }
+                    sourceErrors.isNotEmpty() -> {
+                        val errorSummary = sourceErrors.joinToString("\n") { "${it.sourceName}: ${it.error}" }
+                        _error.value = "Search failed across all sources:\n$errorSummary"
+                    }
+                    else -> {
+                        _error.value = "No results found."
+                    }
                 }
             }
         } catch (e: kotlinx.coroutines.CancellationException) {

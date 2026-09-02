@@ -35,7 +35,7 @@ class WebtoonApplication : Application(), ImageLoaderFactory {
     private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     override fun newImageLoader(): ImageLoader {
-        // Use our custom OkHttpClient so Coil inherits Cloudflare cookies, headers, and interceptors
+        // Coil ImageLoaderFactory: custom OkHttp client + memory/disk caches (see RadiantImageLoader).
         val networkHelper: NetworkHelper by injectLazy()
         
         val imageClient = networkHelper.client.newBuilder()
@@ -99,6 +99,10 @@ class WebtoonApplication : Application(), ImageLoaderFactory {
             database.downloadedChapterDao(),
             database
         )
+    }
+
+    val migrateWebtoonUseCase by lazy {
+        com.radiant.webtoon.core.domain.usecase.MigrateWebtoonUseCase(database)
     }
 
     val downloadManager by lazy {

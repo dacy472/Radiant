@@ -282,6 +282,7 @@ fun LibraryScreen(
                             ),
                             onClick = { onWebtoonClick(item.manga.source, item.manga.url) },
                             onLongClick = { assignTarget = item.manga },
+                            manga = item.manga,
                             sourceId = item.manga.source,
                             unreadCount = item.unreadCount,
                             downloadedCount = item.downloadedCount,

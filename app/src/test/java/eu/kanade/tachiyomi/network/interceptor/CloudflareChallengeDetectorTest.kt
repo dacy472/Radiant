@@ -42,6 +42,20 @@ class CloudflareChallengeDetectorTest {
     }
 
     @Test
+    fun detectsCfMitigatedChallengeHeader() {
+        val response = response(
+            code = 403,
+            headers = mapOf(
+                "Server" to "cloudflare",
+                "cf-mitigated" to "challenge",
+            ),
+            body = "<html></html>",
+        )
+        assertTrue(CloudflareChallengeDetector.isChallengeResponse(response))
+        response.close()
+    }
+
+    @Test
     fun ignores200OkPage() {
         val response = response(
             code = 200,
