@@ -109,6 +109,9 @@ fun ReaderScreen(
     val screenWidthPx = with(density) {
         LocalConfiguration.current.screenWidthDp.dp.roundToPx()
     }
+    val viewportHeightPx = with(density) {
+        LocalConfiguration.current.screenHeightDp.dp.roundToPx()
+    }
 
     // Soft-evict decoded pages when leaving the reader to free heap
     DisposableEffect(Unit) {
@@ -292,8 +295,8 @@ fun ReaderScreen(
                     pages = sortedPages,
                     listState = listState,
                     headers = sourceHeaders,
-                    sourceId = sourceId,
                     screenWidthPx = screenWidthPx,
+                    viewportHeightPx = viewportHeightPx,
                     cropBorders = cropBorders,
                     nextChapter = nextChapter,
                     onTap = { showOverlay = !showOverlay },

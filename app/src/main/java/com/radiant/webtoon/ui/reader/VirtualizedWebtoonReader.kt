@@ -10,7 +10,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.wrapContentHeight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -33,13 +32,9 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.input.pointer.pointerInput
-import androidx.compose.ui.layout.ContentScale
-import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.unit.dp
-import coil.size.Precision
 import com.radiant.webtoon.core.database.Chapter
-import com.radiant.webtoon.ui.components.RadiantAsyncImage
 import okhttp3.Headers
 
 /** Pages kept composed above/below the visible viewport. */
@@ -51,8 +46,8 @@ fun VirtualizedWebtoonColumn(
     pages: List<String>,
     listState: LazyListState,
     headers: Headers,
-    sourceId: String,
     screenWidthPx: Int,
+    viewportHeightPx: Int,
     cropBorders: Boolean,
     nextChapter: Chapter?,
     onTap: () -> Unit,
@@ -100,13 +95,12 @@ fun VirtualizedWebtoonColumn(
             val placeholderHeightPx = pageHeights[index] ?: defaultPlaceholderHeightPx
 
             if (isInWindow) {
-                ReaderPageImage(
-                    index = index,
+                ContinuousVerticalPage(
                     pageUrl = pageUrl,
+                    pageIndex = index,
                     headers = headers,
-                    sourceId = sourceId,
                     screenWidthPx = screenWidthPx,
-                    cropBorders = cropBorders,
+                    viewportHeightPx = viewportHeightPx,
                     placeholderHeightPx = placeholderHeightPx,
                     onHeightMeasured = { height ->
                         if (height > 0) {
@@ -155,64 +149,4 @@ fun VirtualizedWebtoonColumn(
             }
         }
     }
-}
-
-@Composable
-private fun ReaderPageImage(
-    index: Int,
-    pageUrl: String,
-    headers: Headers,
-    sourceId: String,
-    screenWidthPx: Int,
-    cropBorders: Boolean,
-    placeholderHeightPx: Int,
-    onHeightMeasured: (Int) -> Unit,
-) {
-    val density = LocalDensity.current
-    val placeholderHeight = with(density) { placeholderHeightPx.toDp() }
-
-    RadiantAsyncImage(
-        url = pageUrl,
-        contentDescription = "Page ${index + 1}",
-        modifier = Modifier
-            .fillMaxWidth()
-            .wrapContentHeight()
-            .onGloballyPositioned { coordinates ->
-                onHeightMeasured(coordinates.size.height)
-            },
-        headers = headers,
-        sourceId = sourceId,
-        widthPx = screenWidthPx,
-        precision = Precision.INEXACT,
-        crossfade = false,
-        contentScale = if (cropBorders) ContentScale.FillWidth else ContentScale.Fit,
-        loading = {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(placeholderHeight),
-                contentAlignment = Alignment.Center,
-            ) {
-                CircularProgressIndicator(
-                    modifier = Modifier.size(32.dp),
-                    color = Color.White.copy(alpha = 0.7f),
-                    strokeWidth = 2.dp,
-                )
-            }
-        },
-        error = {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(placeholderHeight),
-                contentAlignment = Alignment.Center,
-            ) {
-                Text(
-                    text = "Failed to load page ${index + 1}",
-                    color = Color.Red.copy(alpha = 0.7f),
-                    style = MaterialTheme.typography.bodySmall,
-                )
-            }
-        },
-    )
 }
