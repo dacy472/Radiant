@@ -96,7 +96,7 @@ class ExtensionManager(
             "https://github.com/keiyoushi/extensions/raw/repo/index.pb"
 
         /** Bump when cache format or repo URL changes — clears stale JSON stub caches. */
-        const val EXTENSION_CACHE_VERSION = 3
+        const val EXTENSION_CACHE_VERSION = 4
 
         private val LEGACY_REPO_URLS = setOf(
             "https://cdn.jsdelivr.net/gh/keiyoushi/extensions@repo/index.min.json",
@@ -250,11 +250,7 @@ class ExtensionManager(
             val url = repoUrl ?: resolveRepoUrlForUpdates()
             try {
                 val index = extensionLoader.fetchRepoIndex(url)
-                val processed = index.extensions.map { entry ->
-                    val iconUrl = entry.icon?.takeIf { it.startsWith("http") }
-                        ?: "https://cdn.jsdelivr.net/gh/keiyoushi/extensions@repo/icon/${entry.id}.png"
-                    entry.copy(icon = iconUrl, repoUrl = url)
-                }
+                val processed = index.extensions.map { it.withRepoContext(url) }
                 val languageFiltered = filterAllowedRepoEntries(processed)
                     .filter { isExtensionLanguageEnabled(it.lang) }
                     .distinctBy { it.id }
@@ -437,7 +433,7 @@ class ExtensionManager(
      */
     private suspend fun resolveRemoteExtensionEntries(repoUrl: String?): List<RepoExtensionEntry> {
         val live = _availableExtensions.value
-        if (live.isNotEmpty() && !isStaleStubCache(live)) return live
+        if (live.isNotEmpty() && !isStaleStubCache(live) && live.hasAttachedRepoUrls()) return live
 
         val prefs = context.getSharedPreferences("extension_cache", Context.MODE_PRIVATE)
         val cachedJson = prefs.getString("cached_extensions", null)
@@ -446,7 +442,7 @@ class ExtensionManager(
                 val gson = com.google.gson.Gson()
                 val listType = object : com.google.gson.reflect.TypeToken<List<RepoExtensionEntry>>() {}.type
                 val cached: List<RepoExtensionEntry> = gson.fromJson(cachedJson, listType)
-                if (cached.isNotEmpty() && !isStaleStubCache(cached)) {
+                if (cached.isNotEmpty() && !isStaleStubCache(cached) && cached.hasAttachedRepoUrls()) {
                     _availableExtensions.value = filterAllowedRepoEntries(cached)
                     return filterAllowedRepoEntries(cached)
                 }
@@ -457,11 +453,13 @@ class ExtensionManager(
 
         val url = repoUrl ?: resolveRepoUrlForUpdates()
         return try {
-            extensionLoader.fetchRepoIndex(url).extensions.also { entries ->
-                if (entries.isNotEmpty()) {
-                    _availableExtensions.value = filterAllowedRepoEntries(entries)
+            extensionLoader.fetchRepoIndex(url).extensions
+                .map { it.withRepoContext(url) }
+                .also { entries ->
+                    if (entries.isNotEmpty()) {
+                        _availableExtensions.value = filterAllowedRepoEntries(entries)
+                    }
                 }
-            }
         } catch (e: Exception) {
             Log.w(tag, "Failed to fetch repo for update check: ${e.message}")
             emptyList()
@@ -480,7 +478,7 @@ class ExtensionManager(
             try {
                 val listType = object : com.google.gson.reflect.TypeToken<List<RepoExtensionEntry>>() {}.type
                 val cachedExtensions: List<RepoExtensionEntry> = gson.fromJson(cachedJson, listType)
-                if (!isStaleStubCache(cachedExtensions)) {
+                if (!isStaleStubCache(cachedExtensions) && cachedExtensions.hasAttachedRepoUrls()) {
                     _availableExtensions.value = filterAllowedRepoEntries(cachedExtensions)
                     Log.d(tag, "Loaded ${_availableExtensions.value.size} extensions from cache")
                 } else {
@@ -516,11 +514,7 @@ class ExtensionManager(
                 for (url in repoUrls) {
                     try {
                         val index = extensionLoader.fetchRepoIndex(url)
-                        val processedExtensions = index.extensions.map { entry ->
-                            val iconUrl = entry.icon?.takeIf { it.startsWith("http") }
-                                ?: "https://cdn.jsdelivr.net/gh/keiyoushi/extensions@repo/icon/${entry.id}.png"
-                            entry.copy(icon = iconUrl, repoUrl = url)
-                        }
+                        val processedExtensions = index.extensions.map { it.withRepoContext(url) }
                         allEntries.addAll(processedExtensions)
                     } catch (e: Exception) {
                         Log.e(tag, "Failed to fetch repo: $url", e)
@@ -582,9 +576,9 @@ class ExtensionManager(
 
         for (entry in defaultEntries) {
             val id = entry.id
-            if (entry.repoUrl == null) continue
+            val repoUrl = entry.repoUrl?.takeIf { it.isNotBlank() } ?: resolveRepoUrlForUpdates()
             try {
-                val downloadedFile = extensionLoader.downloadExtensionApk(entry.repoUrl!!, entry)
+                val downloadedFile = extensionLoader.downloadExtensionApk(repoUrl, entry.withRepoUrl(repoUrl))
                 val destFile = java.io.File(extensionLoader.extensionsDir, "${entry.id}.apk")
                 if (destFile.exists()) destFile.setWritable(true)
                 downloadedFile.copyTo(destFile, overwrite = true)
@@ -676,8 +670,9 @@ class ExtensionManager(
     }
 
     private suspend fun resolveExtensionEntry(extensionId: String): RepoExtensionEntry? {
-        _availableUpdates.value.find { it.id == extensionId }?.let { return it }
-        _availableExtensions.value.find { it.id == extensionId }?.let { return it }
+        val local = _availableUpdates.value.find { it.id == extensionId }
+            ?: _availableExtensions.value.find { it.id == extensionId }
+        if (local != null && !local.repoUrl.isNullOrBlank()) return local
 
         val repos = repoDao.getAll()
         val repoUrls = if (repos.isEmpty()) {
@@ -688,13 +683,13 @@ class ExtensionManager(
         for (url in repoUrls) {
             try {
                 val index = extensionLoader.fetchRepoIndex(url)
-                val found = index.extensions.find { it.id == extensionId }?.copy(repoUrl = url)
+                val found = index.extensions.find { it.id == extensionId }?.withRepoContext(url)
                 if (found != null) return found
             } catch (e: Exception) {
                 Log.e(tag, "Failed to look up $extensionId in $url", e)
             }
         }
-        return null
+        return local?.withRepoUrl(resolveRepoUrlForUpdates())
     }
 
     private suspend fun installExtensionEntry(entry: RepoExtensionEntry) {
@@ -710,11 +705,10 @@ class ExtensionManager(
             throw Exception("Only English or multi-language (all) extensions can be installed")
         }
 
-        val repoUrl = entry.repoUrl
-            ?: throw Exception("Extension '$extensionId' has no repository URL")
+        val repoUrl = entry.repoUrl?.takeIf { it.isNotBlank() } ?: resolveRepoUrlForUpdates()
 
         Log.i(tag, "Installing extension locally: $extensionId")
-        val downloadedFile = extensionLoader.downloadExtensionApk(repoUrl, entry)
+        val downloadedFile = extensionLoader.downloadExtensionApk(repoUrl, entry.withRepoUrl(repoUrl))
         val destFile = java.io.File(extensionLoader.extensionsDir, "${entry.id}.apk")
         if (destFile.exists()) destFile.setWritable(true)
         downloadedFile.copyTo(destFile, overwrite = true)
@@ -905,11 +899,7 @@ class ExtensionManager(
             val repoUrl = resolveRepoUrlForUpdates()
             val index = extensionLoader.fetchRepoIndex(repoUrl)
             val entries = filterAllowedRepoEntries(
-                index.extensions.map { entry ->
-                    val iconUrl = entry.icon?.takeIf { it.startsWith("http") }
-                        ?: "https://cdn.jsdelivr.net/gh/keiyoushi/extensions@repo/icon/${entry.id}.png"
-                    entry.copy(icon = iconUrl, repoUrl = repoUrl)
-                },
+                index.extensions.map { it.withRepoContext(repoUrl) },
             )
             _availableExtensions.value = entries
             try {
@@ -1070,6 +1060,9 @@ class ExtensionManager(
         if (entries.size > 10) return false
         return entries.all { ExtensionAllowlist.isRepoStub(it.id) }
     }
+
+    private fun List<RepoExtensionEntry>.hasAttachedRepoUrls(): Boolean =
+        isNotEmpty() && all { !it.repoUrl.isNullOrBlank() }
 
     /** Local APKs override system installs; dedupe by package name. */
     private fun mergeInstalledExtensionInfos(
@@ -1480,9 +1473,8 @@ class ExtensionManager(
             
             val downloadUrl = if (hasUpdate) {
                 updateMatch?.apkUrl?.takeIf { it.isNotBlank() }
-                    ?: updateMatch?.repoUrl?.let { repo ->
-                        val base = repo.substringBeforeLast("/")
-                        "$base/apk/${updateMatch.fileName}"
+                    ?: updateMatch?.repoUrl?.takeIf { it.isNotBlank() }?.let { repo ->
+                        buildExtensionApkUrl(repo, updateMatch.fileName)
                     }
             } else null
 
@@ -1532,11 +1524,9 @@ class ExtensionManager(
 
         return entries.map { entry ->
             val effectiveBaseUrl = entry.baseUrl ?: entry.sources?.firstOrNull()?.baseUrl ?: ""
+            val repoUrl = entry.repoUrl?.takeIf { it.isNotBlank() }
             val downloadUrl = entry.apkUrl?.takeIf { it.isNotBlank() }
-                ?: entry.repoUrl?.let { repo ->
-                    val base = repo.substringBeforeLast("/")
-                    "$base/apk/${entry.fileName}"
-                }
+                ?: repoUrl?.let { buildExtensionApkUrl(it, entry.fileName) }
 
             Extension.Available(
                 id = entry.id,
@@ -1549,9 +1539,16 @@ class ExtensionManager(
                 description = entry.description,
                 baseUrl = effectiveBaseUrl,
                 downloadUrl = downloadUrl,
+                repoUrl = repoUrl,
                 isInstalled = installedPkgs.contains(entry.id),
                 isLanguageEnabled = isExtensionLanguageEnabled(entry.lang),
             )
         }
+    }
+
+    private fun RepoExtensionEntry.withRepoContext(repoUrl: String): RepoExtensionEntry {
+        val iconUrl = icon?.takeIf { it.startsWith("http") }
+            ?: "https://cdn.jsdelivr.net/gh/keiyoushi/extensions@repo/icon/$id.png"
+        return copy(icon = iconUrl, repoUrl = repoUrl)
     }
 }

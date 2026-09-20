@@ -111,7 +111,7 @@ class ExtensionUpdateService(
             }
             else -> throw IOException("Unrecognized index.min.json format")
         }
-        return extensions.onEach { it.repoUrl = repoUrl }
+        return extensions.map { it.withRepoUrl(repoUrl) }
     }
 
     companion object {

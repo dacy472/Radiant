@@ -170,11 +170,14 @@ class ExtensionLoader(private val context: Context) {
         return if (trimmedBody.startsWith("[")) {
             val listType = object : com.google.gson.reflect.TypeToken<List<RepoExtensionEntry>>() {}.type
             val extensions: List<RepoExtensionEntry> = gson.fromJson(trimmedBody, listType)
-            RepoIndex(name = "Legacy Repository", description = "", extensions = extensions.onEach { it.repoUrl = repoUrl })
+            RepoIndex(
+                name = "Legacy Repository",
+                description = "",
+                extensions = extensions.attachRepoUrl(repoUrl),
+            )
         } else {
-            gson.fromJson(trimmedBody, RepoIndex::class.java).also { index ->
-                index.extensions.forEach { it.repoUrl = repoUrl }
-            }
+            val index = gson.fromJson(trimmedBody, RepoIndex::class.java)
+            index.copy(extensions = index.extensions.attachRepoUrl(repoUrl))
         }
     }
 
@@ -188,15 +191,7 @@ class ExtensionLoader(private val context: Context) {
         repoUrl: String,
         entry: RepoExtensionEntry
     ): File = withContext(Dispatchers.IO) {
-        val downloadUrl = entry.apkUrl?.takeIf { it.isNotBlank() }
-            ?: run {
-                val baseRepoUrl = if (repoUrl.trim().endsWith(".json") || repoUrl.trim().endsWith(".pb")) {
-                    repoUrl.trim().substringBeforeLast("/")
-                } else {
-                    repoUrl.trimEnd('/')
-                }
-                "$baseRepoUrl/apk/${entry.fileName}"
-            }
+        val downloadUrl = buildExtensionApkUrl(repoUrl, entry.fileName, entry.apkUrl)
         Log.d(tag, "Downloading extension APK: ${entry.name} from $downloadUrl")
 
         val request = Request.Builder().url(downloadUrl).build()
@@ -224,16 +219,8 @@ class ExtensionLoader(private val context: Context) {
      * Use this for extensions that should be installed into the system.
      */
     fun downloadExtensionViaManager(repoUrl: String, entry: RepoExtensionEntry) {
-        val downloadUrl = entry.apkUrl?.takeIf { it.isNotBlank() }
-            ?: run {
-                val baseRepoUrl = if (repoUrl.trim().endsWith(".json") || repoUrl.trim().endsWith(".pb")) {
-                    repoUrl.trim().substringBeforeLast("/")
-                } else {
-                    repoUrl.trimEnd('/')
-                }
-                "$baseRepoUrl/apk/${entry.fileName}"
-            }
-        
+        val downloadUrl = buildExtensionApkUrl(repoUrl, entry.fileName, entry.apkUrl)
+
         val downloadManager = context.getSystemService(android.content.Context.DOWNLOAD_SERVICE) as android.app.DownloadManager
         val request = android.app.DownloadManager.Request(android.net.Uri.parse(downloadUrl)).apply {
             setTitle("Radiant Extension: ${entry.name}")
@@ -855,10 +842,38 @@ data class RepoExtensionEntry(
     @SerializedName("versionCode") val versionCode: Long = 0,
     @SerializedName(value = "fileName", alternate = ["apk"]) val fileName: String,
     /** Full APK URL from protobuf repos; preferred over repoUrl + /apk/fileName */
-    @Transient val apkUrl: String? = null,
+    @SerializedName("apkUrl") val apkUrl: String? = null,
     @SerializedName(value = "nsfw", alternate = ["isNsfw"]) val nsfw: Int = 0,
     @SerializedName("description") val description: String? = null,
     @SerializedName("extensionLib") val extensionLibVersion: String? = null,
     @SerializedName("sources") val sources: List<RepoExtensionSource>? = null,
-    @Transient var repoUrl: String? = null
+    /** Parent repository base URL; injected after JSON/protobuf parse and persisted in cache. */
+    @SerializedName("repoUrl") val repoUrl: String? = null,
 )
+
+/** Strip `index.json` / `index.pb` (and similar) so APK paths resolve against the repo root. */
+internal fun repoIndexBaseUrl(repoUrl: String): String {
+    val trimmed = repoUrl.trim().trimEnd('/')
+    return if (trimmed.endsWith(".json", ignoreCase = true) || trimmed.endsWith(".pb", ignoreCase = true)) {
+        trimmed.substringBeforeLast("/")
+    } else {
+        trimmed
+    }
+}
+
+/**
+ * Final APK download link: prefer an explicit [apkUrl], otherwise `{repoBase}/apk/{fileName}`.
+ */
+internal fun buildExtensionApkUrl(repoUrl: String, fileName: String, apkUrl: String? = null): String {
+    apkUrl?.takeIf { it.isNotBlank() }?.let { return it }
+    val file = fileName.trim()
+    if (file.startsWith("http://") || file.startsWith("https://")) return file
+    val relative = file.trimStart('/')
+    val path = if (relative.startsWith("apk/", ignoreCase = true)) relative else "apk/$relative"
+    return "${repoIndexBaseUrl(repoUrl)}/$path"
+}
+
+internal fun RepoExtensionEntry.withRepoUrl(repoUrl: String): RepoExtensionEntry = copy(repoUrl = repoUrl)
+
+internal fun List<RepoExtensionEntry>.attachRepoUrl(repoUrl: String): List<RepoExtensionEntry> =
+    map { it.withRepoUrl(repoUrl) }
