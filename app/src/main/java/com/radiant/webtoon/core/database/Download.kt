@@ -30,7 +30,7 @@ interface DownloadDao {
     @Query("SELECT * FROM downloads ORDER BY orderIndex ASC, dateAdded ASC")
     suspend fun getAll(): List<DownloadTask>
 
-    @Query("SELECT * FROM downloads WHERE status = 'DOWNLOADING' OR status = 'PENDING' OR status = 'PAUSED' ORDER BY orderIndex ASC, dateAdded ASC")
+    @Query("SELECT * FROM downloads WHERE status IN ('DOWNLOADING', 'PENDING', 'PAUSED', 'FAILED') ORDER BY orderIndex ASC, dateAdded ASC")
     suspend fun getActiveQueue(): List<DownloadTask>
 
     @Query("SELECT * FROM downloads WHERE status = 'DOWNLOADING' OR status = 'PENDING' ORDER BY orderIndex ASC, dateAdded ASC LIMIT 1")
@@ -45,7 +45,10 @@ interface DownloadDao {
     @Query("SELECT COUNT(*) FROM downloads WHERE status = 'DOWNLOADING'")
     suspend fun countDownloading(): Int
 
-    @Query("SELECT EXISTS(SELECT 1 FROM downloads WHERE status IN ('PENDING', 'DOWNLOADING', 'PAUSED'))")
+    @Query("SELECT * FROM downloads WHERE status = 'DOWNLOADING'")
+    suspend fun getDownloading(): List<DownloadTask>
+
+    @Query("SELECT EXISTS(SELECT 1 FROM downloads WHERE status IN ('PENDING', 'DOWNLOADING'))")
     suspend fun hasActiveWork(): Boolean
 
     @Insert(onConflict = OnConflictStrategy.REPLACE)

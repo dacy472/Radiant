@@ -67,6 +67,12 @@ fun SearchScreen(
 
     val snackbarHostState = androidx.compose.runtime.remember { SnackbarHostState() }
 
+    androidx.compose.runtime.LaunchedEffect(migrationViewModel) {
+        migrationViewModel.errors.collect { message ->
+            snackbarHostState.showSnackbar(message = message, duration = SnackbarDuration.Long)
+        }
+    }
+
     androidx.compose.runtime.LaunchedEffect(uiError) {
         if (uiError != null && results.isNotEmpty()) {
             snackbarHostState.showSnackbar(
@@ -85,7 +91,9 @@ fun SearchScreen(
                     TextField(
                         value = query,
                         onValueChange = { viewModel.onQueryChange(it) },
-                        placeholder = { Text("Search pinned sources...") },
+                        placeholder = {
+                            Text(if (migrateFromManga != null) "Search other sources..." else "Search pinned sources...")
+                        },
                         modifier = Modifier.fillMaxWidth(),
                         keyboardOptions = androidx.compose.foundation.text.KeyboardOptions(
                             imeAction = androidx.compose.ui.text.input.ImeAction.Search
@@ -129,6 +137,16 @@ fun SearchScreen(
         Column(modifier = Modifier.fillMaxSize().padding(paddingValues)) {
             if (isSearching) {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+            }
+
+            migrateFromManga?.let { from ->
+                val fromSourceName = repository.extensionManager.getSource(from.source)?.name ?: "Unavailable source"
+                Text(
+                    text = "Migrating \"${from.title}\" from $fromSourceName. Pick the matching title below.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
+                )
             }
 
             // FILTER CHIPS
@@ -296,29 +314,41 @@ fun SearchScreen(
         if (showMigrationDialog != null) {
             val (targetSourceId, targetWebtoon) = showMigrationDialog!!
             AlertDialog(
-                onDismissRequest = { showMigrationDialog = null },
-                title = { Text("Confirm Migration") },
+                onDismissRequest = { if (!isMigrating) showMigrationDialog = null },
+                title = { Text("Migrate to this title?") },
                 text = {
-                    val sourceName = repository.extensionManager.getSource(targetSourceId)?.name ?: targetSourceId
-                    Text(
-                        "Migrate '${migrateFromManga?.title}' to '${targetWebtoon.title}' on $sourceName?\n" +
-                            "This will transfer your reading progress."
-                    )
+                    val newSourceName = repository.extensionManager.getSource(targetSourceId)?.name ?: targetSourceId
+                    val oldSourceName = migrateFromManga?.source?.let {
+                        repository.extensionManager.getSource(it)?.name
+                    } ?: "Unavailable source"
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        Text("From: ${migrateFromManga?.title.orEmpty()} ($oldSourceName)")
+                        Text("To: ${targetWebtoon.title} ($newSourceName)")
+                        Text(
+                            "Reading progress, bookmarks and library categories will transfer to the new " +
+                                "entry. The old entry will be removed from your library.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
                 },
                 confirmButton = {
-                    Button(onClick = {
-                        val oldManga = migrateFromManga ?: return@Button
-                        migrationViewModel.migrateWebtoon(oldManga, targetWebtoon, targetSourceId) {
+                    Button(
+                        enabled = !isMigrating,
+                        onClick = {
+                            val oldManga = migrateFromManga ?: return@Button
                             showMigrationDialog = null
-                            val newWebtoonId = targetWebtoon.url?.takeIf { it.isNotBlank() } ?: targetWebtoon.id
-                            onMigrationComplete(targetSourceId, newWebtoonId)
-                        }
-                    }) {
+                            migrationViewModel.migrateWebtoon(oldManga, targetWebtoon, targetSourceId) {
+                                val newWebtoonId = targetWebtoon.url?.takeIf { it.isNotBlank() } ?: targetWebtoon.id
+                                onMigrationComplete(targetSourceId, newWebtoonId)
+                            }
+                        },
+                    ) {
                         Text("Migrate")
                     }
                 },
                 dismissButton = {
-                    TextButton(onClick = { showMigrationDialog = null }) {
+                    TextButton(enabled = !isMigrating, onClick = { showMigrationDialog = null }) {
                         Text("Cancel")
                     }
                 }
@@ -334,7 +364,7 @@ fun SearchScreen(
                     ) {
                         CircularProgressIndicator()
                         Spacer(modifier = Modifier.height(16.dp))
-                        Text("Migrating progress...")
+                        Text("Migrating...")
                     }
                 }
             }

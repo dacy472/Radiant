@@ -83,10 +83,12 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import coil.imageLoader
 import coil.size.Precision
+import com.radiant.webtoon.ui.components.AppMotion
 import com.radiant.webtoon.ui.components.RadiantAsyncImage
 import kotlinx.coroutines.launch
 import kotlin.math.roundToInt
 import com.radiant.webtoon.core.settings.SettingsManager
+import com.radiant.webtoon.ui.reader.viewer.ReadingMode
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
@@ -131,6 +133,7 @@ fun ReaderScreen(
     val sourceHeaders by viewModel.sourceHeaders.collectAsStateWithLifecycle()
     
     val readingMode by viewModel.readingMode.collectAsStateWithLifecycle()
+    val stripMode = readingMode.usesRecycler
     val backgroundColor by viewModel.backgroundColor.collectAsStateWithLifecycle()
     val cropBorders by viewModel.cropBorders.collectAsStateWithLifecycle()
     val nextChapter by viewModel.nextChapter.collectAsStateWithLifecycle()
@@ -138,6 +141,8 @@ fun ReaderScreen(
     val hasPreviousChapter by viewModel.hasPreviousChapter.collectAsStateWithLifecycle()
     val resetPositionTick by viewModel.resetPositionTick.collectAsStateWithLifecycle()
     val activeChapterId by viewModel.activeChapterId.collectAsStateWithLifecycle()
+    val loadGeneration by viewModel.loadGeneration.collectAsStateWithLifecycle()
+    val initialPageIndex by viewModel.initialPageIndex.collectAsStateWithLifecycle()
 
     val coroutineScope = rememberCoroutineScope()
     var markedRead by remember(activeChapterId) { mutableStateOf(false) }
@@ -145,6 +150,10 @@ fun ReaderScreen(
     LaunchedEffect(sourceId, webtoonId, chapterId) {
         markedRead = false
         viewModel.loadChapter(sourceId, webtoonId, chapterId, chapterTitle)
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { viewModel.flushLastPage() }
     }
 
     // Apply keep screen on flag
@@ -174,28 +183,37 @@ fun ReaderScreen(
         if (nextChapter != null) sortedPages.size + 1 else sortedPages.size 
     })
 
-    LaunchedEffect(resetPositionTick) {
-        if (resetPositionTick == 0) return@LaunchedEffect
-        listState.scrollToItem(0)
-        pagerState.scrollToPage(0)
+    LaunchedEffect(loadGeneration, sortedPages.size, initialPageIndex, isLoading) {
+        if (isLoading || sortedPages.isEmpty()) return@LaunchedEffect
+        val target = ReaderSessionLogic.resumePageIndex(initialPageIndex, sortedPages.size)
+        listState.scrollToItem(target)
+        if (pagerState.pageCount > 0) {
+            pagerState.scrollToPage(target.coerceAtMost(pagerState.pageCount - 1))
+        }
     }
 
     // Page counter — derived from the list/pager state
     val currentPage by remember(readingMode) {
         derivedStateOf {
-            if (readingMode == 0) listState.firstVisibleItemIndex + 1
+            if (stripMode) listState.firstVisibleItemIndex + 1
             else pagerState.currentPage + 1
         }
     }
 
-    // Mark chapter read near the end (last page or ~90%)
-    LaunchedEffect(currentPage, sortedPages.size, activeChapterId) {
-        if (!markedRead && sortedPages.isNotEmpty() && activeChapterId.isNotBlank()) {
-            val threshold = (sortedPages.size * 0.9f).toInt().coerceAtLeast(1)
-            if (currentPage >= threshold || currentPage >= sortedPages.size) {
-                markedRead = true
-                viewModel.markChapterReadWhenComplete(activeChapterId, webtoonId)
-            }
+    LaunchedEffect(currentPage, sortedPages.size, activeChapterId, loadGeneration, isLoading) {
+        if (isLoading || sortedPages.isEmpty() || activeChapterId.isBlank()) return@LaunchedEffect
+        viewModel.persistLastPage((currentPage - 1).coerceAtLeast(0), loadGeneration)
+        if (!markedRead && ReaderSessionLogic.shouldMarkRead(
+                isLoading = isLoading,
+                pagesReady = sortedPages.isNotEmpty(),
+                currentPageOneBased = currentPage,
+                pageCount = sortedPages.size,
+                activeGeneration = loadGeneration,
+                eventGeneration = loadGeneration,
+            )
+        ) {
+            markedRead = true
+            viewModel.markChapterReadWhenComplete(activeChapterId, webtoonId, loadGeneration)
         }
     }
 
@@ -228,7 +246,7 @@ fun ReaderScreen(
                 when (event.nativeKeyEvent.keyCode) {
                     KeyEvent.KEYCODE_VOLUME_DOWN -> {
                         coroutineScope.launch {
-                            if (readingMode == 0) {
+                            if (stripMode) {
                                 val next = (listState.firstVisibleItemIndex + 1).coerceAtMost(sortedPages.lastIndex)
                                 listState.animateScrollToItem(next)
                             } else {
@@ -241,7 +259,7 @@ fun ReaderScreen(
                     }
                     KeyEvent.KEYCODE_VOLUME_UP -> {
                         coroutineScope.launch {
-                            if (readingMode == 0) {
+                            if (stripMode) {
                                 val prev = (listState.firstVisibleItemIndex - 1).coerceAtLeast(0)
                                 listState.animateScrollToItem(prev)
                             } else {
@@ -287,7 +305,7 @@ fun ReaderScreen(
                 }
             }
         } else {
-            if (readingMode == 0) {
+            if (stripMode) {
                 VirtualizedWebtoonColumn(
                     pages = sortedPages,
                     listState = listState,
@@ -303,7 +321,7 @@ fun ReaderScreen(
                 )
             } else {
                 // Horizontal pager (LTR or RTL)
-                val isRtl = readingMode == 2
+                val isRtl = readingMode == ReadingMode.RIGHT_TO_LEFT
                 val onPagerTap: (Offset, Int) -> Unit = { tap, widthPx ->
                     val x = tap.x
                     val width = widthPx.toFloat().coerceAtLeast(1f)
@@ -430,8 +448,8 @@ fun ReaderScreen(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
                     .padding(bottom = 24.dp),
-                enter = fadeIn(),
-                exit = fadeOut()
+                enter = fadeIn(AppMotion.chrome()),
+                exit = fadeOut(AppMotion.chrome())
             ) {
                 Surface(
                     shape = RoundedCornerShape(20.dp),
@@ -453,8 +471,14 @@ fun ReaderScreen(
         // ── Immersive Overlay (TopAppBar + bottom controls) ──
         AnimatedVisibility(
             visible = showOverlay,
-            enter = fadeIn() + slideInVertically(initialOffsetY = { -it }),
-            exit = fadeOut() + slideOutVertically(targetOffsetY = { -it })
+            enter = fadeIn(AppMotion.chrome()) + slideInVertically(
+                animationSpec = AppMotion.chrome(),
+                initialOffsetY = { -it },
+            ),
+            exit = fadeOut(AppMotion.chrome()) + slideOutVertically(
+                animationSpec = AppMotion.chrome(),
+                targetOffsetY = { -it },
+            )
         ) {
             Box(modifier = Modifier.fillMaxSize()) {
                 Column(modifier = Modifier.fillMaxSize()) {
@@ -482,8 +506,14 @@ fun ReaderScreen(
                 // ── Bottom bar — slides in from bottom ──
                 AnimatedVisibility(
                     visible = showOverlay,
-                    enter = fadeIn() + slideInVertically(initialOffsetY = { it }),
-                    exit = fadeOut() + slideOutVertically(targetOffsetY = { it })
+                    enter = fadeIn(AppMotion.chrome()) + slideInVertically(
+                        animationSpec = AppMotion.chrome(),
+                        initialOffsetY = { it },
+                    ),
+                    exit = fadeOut(AppMotion.chrome()) + slideOutVertically(
+                        animationSpec = AppMotion.chrome(),
+                        targetOffsetY = { it },
+                    )
                 ) {
                     Box(
                         modifier = Modifier
@@ -508,13 +538,12 @@ fun ReaderScreen(
                                 )
                             }
                             IconButton(onClick = {
-                                val nextMode = (readingMode + 1) % 3
-                                viewModel.setReadingMode(nextMode)
+                                viewModel.setReadingMode(readingMode.next())
                             }) {
                                 val (modeIcon, modeLabel) = when (readingMode) {
-                                    1 -> Icons.Default.SwapHoriz to "Left to right"
-                                    2 -> Icons.Default.SwapHoriz to "Right to left"
-                                    else -> Icons.Default.SwapVert to "Vertical scroll"
+                                    ReadingMode.LEFT_TO_RIGHT, ReadingMode.RIGHT_TO_LEFT ->
+                                        Icons.Default.SwapHoriz to readingMode.label
+                                    else -> Icons.Default.SwapVert to readingMode.label
                                 }
                                 Icon(modeIcon, contentDescription = "Reading mode: $modeLabel", tint = Color.White)
                             }
@@ -555,7 +584,7 @@ fun ReaderScreen(
                     }
 
                     if (sortedPages.size > 1) {
-                        val pageIndex = if (readingMode == 0) {
+                        val pageIndex = if (stripMode) {
                             listState.firstVisibleItemIndex
                         } else {
                             pagerState.currentPage.coerceAtMost(sortedPages.lastIndex)
@@ -569,7 +598,7 @@ fun ReaderScreen(
                                 .padding(vertical = 8.dp),
                             onPageChange = { page ->
                                 coroutineScope.launch {
-                                    if (readingMode == 0) {
+                                    if (stripMode) {
                                         listState.scrollToItem(page)
                                     } else {
                                         pagerState.scrollToPage(page)

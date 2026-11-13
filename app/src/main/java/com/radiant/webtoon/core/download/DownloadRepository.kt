@@ -94,11 +94,22 @@ class DownloadRepository(
         webtoonRepository.deleteDownloadFiles(task)
     }
 
-    suspend fun getChapterPages(sourceId: String, chapterId: String): List<String> =
-        webtoonRepository.getChapterPages(sourceId, chapterId)
+    suspend fun getChapterPages(sourceId: String, chapterId: String, mangaId: String? = null): List<String> =
+        webtoonRepository.getChapterPages(sourceId, chapterId, mangaId)
 
-    suspend fun countDownloading(): Int = withContext(Dispatchers.IO) {
-        downloadDao.countDownloading()
+    suspend fun getDownloading(): List<DownloadTask> = withContext(Dispatchers.IO) {
+        downloadDao.getDownloading()
+    }
+
+    suspend fun recoverOrphanedDownloading(hasInMemoryJob: (DownloadTask) -> Boolean) = withContext(Dispatchers.IO) {
+        database.withTransaction {
+            downloadDao.getDownloading().forEach { task ->
+                val recovered = DownloadQueuePolicy.recoveredStatus(task, hasInMemoryJob(task))
+                if (recovered != task.status) {
+                    downloadDao.update(task.copy(status = recovered))
+                }
+            }
+        }
     }
 
     suspend fun getPendingTasks(limit: Int): List<DownloadTask> = withContext(Dispatchers.IO) {

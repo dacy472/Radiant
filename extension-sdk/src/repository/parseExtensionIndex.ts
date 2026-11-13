@@ -75,12 +75,16 @@ function parseExtensionEntry(raw: unknown, index: number): RemoteExtensionEntry 
   const lang = readOptionalString(raw, 'lang');
   const description = readOptionalString(raw, 'description');
   const nsfw = readOptionalBoolean(raw, 'nsfw');
+  const publisher = readOptionalString(raw, 'publisher');
+  const sha256 = readOptionalString(raw, 'sha256');
 
   return {
     ...entry,
     ...(lang !== undefined ? { lang } : {}),
     ...(description !== undefined ? { description } : {}),
     ...(nsfw !== undefined ? { nsfw } : {}),
+    ...(publisher !== undefined ? { publisher } : {}),
+    ...(sha256 !== undefined ? { sha256 } : {}),
   };
 }
 

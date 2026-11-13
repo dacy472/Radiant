@@ -13,7 +13,9 @@ import kotlinx.coroutines.flow.stateIn
 
 /** Pairs a source with how many library entries it has — shown in the Migrate tab. */
 data class MigrateItem(
-    val source: Source,
+    val sourceId: String,
+    /** Null when the extension that provided this source is no longer installed. */
+    val source: Source?,
     val libraryCount: Int
 )
 
@@ -34,11 +36,16 @@ class BrowseViewModel(application: Application) : AndroidViewModel(application) 
     ) { counts, sources ->
         val sourceMap: Map<String, Source> = sources.associateBy { it.id }
         counts
-            .mapNotNull { count ->
-                val source = sourceMap[count.sourceId] ?: return@mapNotNull null
-                MigrateItem(source = source, libraryCount = count.count)
+            .filter { it.count > 0 }
+            .map { count ->
+                MigrateItem(
+                    sourceId = count.sourceId,
+                    source = sourceMap[count.sourceId],
+                    libraryCount = count.count,
+                )
             }
-            .sortedByDescending { it.libraryCount }
+            // Installed sources first, then unavailable ones; busiest first within each group.
+            .sortedWith(compareBy<MigrateItem> { it.source == null }.thenByDescending { it.libraryCount })
     }.stateIn(
         scope = viewModelScope,
         started = SharingStarted.WhileSubscribed(5_000),

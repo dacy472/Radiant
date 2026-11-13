@@ -37,6 +37,7 @@ fun TrackBindDialog(
     var query by remember(mangaTitle) { mutableStateOf(mangaTitle) }
     var results by remember { mutableStateOf<List<TrackerEntry>>(emptyList()) }
     var isSearching by remember { mutableStateOf(false) }
+    var searchError by remember { mutableStateOf<String?>(null) }
 
     SpringAlertDialog(
         onDismissRequest = onDismiss,
@@ -54,7 +55,10 @@ fun TrackBindDialog(
                     onClick = {
                         scope.launch {
                             isSearching = true
-                            results = runCatching { trackerService.search(query) }.getOrDefault(emptyList())
+                            searchError = null
+                            val outcome = runCatching { trackerService.search(query) }
+                            results = outcome.getOrDefault(emptyList())
+                            searchError = outcome.exceptionOrNull()?.message
                             isSearching = false
                         }
                     },
@@ -63,7 +67,13 @@ fun TrackBindDialog(
                 ) {
                     Text(if (isSearching) "Searching..." else "Search AniList")
                 }
-                if (results.isEmpty() && !isSearching) {
+                if (searchError != null) {
+                    Text(
+                        searchError!!,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.error
+                    )
+                } else if (results.isEmpty() && !isSearching) {
                     Text(
                         "Search for a title to bind tracking.",
                         style = MaterialTheme.typography.bodySmall,

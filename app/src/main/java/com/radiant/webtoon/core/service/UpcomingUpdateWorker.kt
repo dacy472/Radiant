@@ -23,7 +23,7 @@ class UpcomingUpdateWorker(
             val weekAhead = now + 7L * 24 * 60 * 60 * 1000
 
             for (manga in library) {
-                val chapters = app.database.chapterDao().getChapters(manga.url)
+                val chapters = app.database.chapterDao().getChapters(manga.url, manga.source)
                 val unread = chapters.filter { !it.read }
                 val next = unread.minByOrNull { it.chapter_number } ?: continue
                 val releaseAt = next.date_upload.takeIf { it > 0 } ?: (now + 24 * 60 * 60 * 1000)

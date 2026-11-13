@@ -18,6 +18,9 @@ data class Track(
 
 @Dao
 interface TrackDao {
+    @Query("SELECT * FROM tracks")
+    suspend fun getAll(): List<Track>
+
     @Query("SELECT * FROM tracks WHERE mangaUrl = :mangaUrl AND mangaSource = :mangaSource")
     suspend fun getForManga(mangaUrl: String, mangaSource: String): List<Track>
 

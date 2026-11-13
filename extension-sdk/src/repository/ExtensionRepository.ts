@@ -1,5 +1,6 @@
 import type { UrlString } from '../models.js';
 import type { Source } from '../source.js';
+import { assertTrustedArtifact } from '../runtime/artifactTrust.js';
 import { BundleRuntime } from '../runtime/BundleRuntime.js';
 import type { DownloadedBundle } from '../runtime/downloadBundle.js';
 import { ExtensionBundleError } from '../runtime/errors.js';
@@ -206,11 +207,15 @@ export class ExtensionRepository {
     this.store.setInstalling(extensionId);
 
     try {
-      const { bundle, source } = await this.runtime.loadSourceFromUrl(
-        catalogEntry.bundleUrl,
+      const bundle = await this.runtime.downloadBundle(catalogEntry.bundleUrl);
+      assertTrustedArtifact({
         extensionId,
-        extensionId,
-      );
+        actualSha256: bundle.sha256,
+        code: bundle.code,
+        ...(catalogEntry.publisher !== undefined ? { publisher: catalogEntry.publisher } : {}),
+        ...(catalogEntry.sha256 !== undefined ? { expectedSha256: catalogEntry.sha256 } : {}),
+      });
+      const source = await this.runtime.instantiateSource(bundle, extensionId, extensionId);
 
       const record: InstalledExtension = {
         id: catalogEntry.id,

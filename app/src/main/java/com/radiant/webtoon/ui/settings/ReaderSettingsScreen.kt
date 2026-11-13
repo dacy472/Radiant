@@ -23,6 +23,7 @@ fun ReaderSettingsScreen(onBackClick: () -> Unit) {
     val volumeKeysNav by settingsManager.volumeKeysNav.collectAsState(initial = false)
 
     val cropBorders by settingsManager.cropBorders.collectAsState(initial = false)
+    val cropBordersWebtoon by settingsManager.cropBordersWebtoon.collectAsState(initial = false)
     val readerTapZones by settingsManager.readerTapZones.collectAsState(initial = true)
     val pureBlackReader by settingsManager.pureBlackReader.collectAsState(initial = false)
     val readerBrightness by settingsManager.readerBrightness.collectAsState(initial = "system")
@@ -43,14 +44,20 @@ fun ReaderSettingsScreen(onBackClick: () -> Unit) {
             // Reading direction
             Text("Reading Direction", style = MaterialTheme.typography.titleMedium)
             Spacer(modifier = Modifier.height(8.dp))
-            Row(modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
-                val directions = listOf("vertical" to "Vertical", "ltr" to "Left to Right", "rtl" to "Right to Left")
+            Column(modifier = Modifier.fillMaxWidth().padding(top = 4.dp)) {
+                val directions = listOf(
+                    "webtoon" to "Webtoon",
+                    "continuous_vertical" to "Continuous vertical",
+                    "vertical_pager" to "Vertical pager",
+                    "ltr" to "Left to right",
+                    "rtl" to "Right to left",
+                )
                 directions.forEach { (value, label) ->
                     FilterChip(
-                        selected = readingDirection == value,
+                        selected = readingDirection == value || (value == "webtoon" && readingDirection == "vertical"),
                         onClick = { scope.launch { settingsManager.setReadingDirection(value) } },
                         label = { Text(label, style = MaterialTheme.typography.labelSmall) },
-                        modifier = Modifier.padding(end = 8.dp)
+                        modifier = Modifier.padding(bottom = 8.dp),
                     )
                 }
             }
@@ -100,11 +107,32 @@ fun ReaderSettingsScreen(onBackClick: () -> Unit) {
             ) {
                 Column {
                     Text("Crop borders", style = MaterialTheme.typography.titleMedium)
-                    Text("Trim white margins around pages", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    Text("Paged readers: strip uniform-colour edges while decoding", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                 }
                 Switch(
                     checked = cropBorders,
                     onCheckedChange = { scope.launch { settingsManager.setCropBorders(it) } },
+                )
+            }
+
+            HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = androidx.compose.ui.Alignment.CenterVertically,
+            ) {
+                Column(modifier = Modifier.weight(1f)) {
+                    Text("Crop borders (webtoon)", style = MaterialTheme.typography.titleMedium)
+                    Text(
+                        "Webtoon and continuous vertical: strip uniform-colour edges while decoding",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Switch(
+                    checked = cropBordersWebtoon,
+                    onCheckedChange = { scope.launch { settingsManager.setCropBordersWebtoon(it) } },
                 )
             }
 

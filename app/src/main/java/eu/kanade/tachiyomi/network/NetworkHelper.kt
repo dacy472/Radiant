@@ -142,7 +142,9 @@ class NetworkHelper(context: Context) {
             .dispatcher(
                 Dispatcher().apply {
                     maxRequests = 16
-                    maxRequestsPerHost = 3
+                    // Reader pages use extension clients built on this dispatcher; stay below
+                    // OkHttp's default of 5 so image CDNs don't rate-limit us.
+                    maxRequestsPerHost = 4
                 }
             )
             .retryOnConnectionFailure(true)
@@ -175,8 +177,13 @@ class NetworkHelper(context: Context) {
             // Last network interceptor: logs the request that actually goes on the wire
             // (after application interceptors and CloudflareCookieInterceptor).
             .addNetworkInterceptor(
-                HttpLoggingInterceptor().apply {
+                HttpLoggingInterceptor { message ->
+                    android.util.Log.i("OkHttp", message)
+                }.apply {
                     level = HttpLoggingInterceptor.Level.HEADERS
+                    redactHeader("Cookie")
+                    redactHeader("Set-Cookie")
+                    redactHeader("Authorization")
                 }
             )
             .build()

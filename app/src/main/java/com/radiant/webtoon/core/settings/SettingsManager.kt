@@ -39,6 +39,8 @@ class SettingsManager(private val context: Context) {
         val PINNED_SOURCES = stringSetPreferencesKey("pinned_sources")
 
         val CROP_BORDERS = booleanPreferencesKey("crop_borders")
+        val CROP_BORDERS_WEBTOON = booleanPreferencesKey("crop_borders_webtoon")
+        const val READING_MODE_OVERRIDE_PREFIX = "reading_mode_override:"
         val READER_BG = stringPreferencesKey("reader_bg")
         val INCOGNITO = booleanPreferencesKey("incognito")
         val FLAG_SECURE = booleanPreferencesKey("flag_secure")
@@ -50,6 +52,7 @@ class SettingsManager(private val context: Context) {
 
         val READER_BRIGHTNESS = stringPreferencesKey("reader_brightness")
         val READER_TAP_ZONES = booleanPreferencesKey("reader_tap_zones")
+        val READER_ORIENTATION = stringPreferencesKey("reader_orientation")
         val PURE_BLACK_READER = booleanPreferencesKey("pure_black_reader")
         val DOWNLOAD_INDEX_BACKFILLED = booleanPreferencesKey("download_index_backfilled")
         val PAGE_LIST_DEBUG_MODE = booleanPreferencesKey("page_list_debug_mode")
@@ -232,6 +235,29 @@ class SettingsManager(private val context: Context) {
         context.dataStore.edit { it[CROP_BORDERS] = enabled }
     }
 
+    /**
+     * Crop borders for the webtoon / continuous-vertical viewers. [cropBorders] stays the setting
+     * for the paged viewers (LTR / RTL / vertical pager).
+     */
+    val cropBordersWebtoon: Flow<Boolean> = context.dataStore.data.map { it[CROP_BORDERS_WEBTOON] ?: false }
+    suspend fun setCropBordersWebtoon(enabled: Boolean) {
+        context.dataStore.edit { it[CROP_BORDERS_WEBTOON] = enabled }
+    }
+
+    /**
+     * Per-series reading-mode override (a [com.radiant.webtoon.ui.reader.viewer.ReadingMode.prefId]).
+     * `null` means "use the default" ([readingDirection]).
+     */
+    fun readingModeOverride(seriesKey: String): Flow<String?> =
+        context.dataStore.data.map { it[stringPreferencesKey(READING_MODE_OVERRIDE_PREFIX + seriesKey)] }
+
+    suspend fun setReadingModeOverride(seriesKey: String, modeId: String?) {
+        val key = stringPreferencesKey(READING_MODE_OVERRIDE_PREFIX + seriesKey)
+        context.dataStore.edit { prefs ->
+            if (modeId == null) prefs.remove(key) else prefs[key] = modeId
+        }
+    }
+
     val readerBg: Flow<String> = context.dataStore.data.map { it[READER_BG] ?: "black" }
     suspend fun setReaderBg(bg: String) {
         context.dataStore.edit { it[READER_BG] = bg }
@@ -292,6 +318,12 @@ class SettingsManager(private val context: Context) {
     val readerTapZones: Flow<Boolean> = context.dataStore.data.map { it[READER_TAP_ZONES] ?: true }
     suspend fun setReaderTapZones(enabled: Boolean) {
         context.dataStore.edit { it[READER_TAP_ZONES] = enabled }
+    }
+
+    /** `free` (follow system), `portrait`, `landscape` or `locked` (keep the current orientation). */
+    val readerOrientation: Flow<String> = context.dataStore.data.map { it[READER_ORIENTATION] ?: "free" }
+    suspend fun setReaderOrientation(value: String) {
+        context.dataStore.edit { it[READER_ORIENTATION] = value }
     }
 
     val pureBlackReader: Flow<Boolean> = context.dataStore.data.map { it[PURE_BLACK_READER] ?: false }

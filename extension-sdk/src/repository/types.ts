@@ -12,6 +12,8 @@ export interface RemoteExtensionEntry {
   readonly lang?: string;
   readonly description?: string;
   readonly nsfw?: boolean;
+  readonly publisher?: string;
+  readonly sha256?: string;
 }
 
 /**

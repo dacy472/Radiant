@@ -4,10 +4,10 @@ import androidx.room.*
 import kotlinx.coroutines.flow.Flow
 
 @Entity(
-    tableName = "history"
+    tableName = "history",
+    primaryKeys = ["source_id", "webtoon_id", "chapter_id"],
 )
 data class History(
-    @PrimaryKey
     val chapter_id: String,
     val webtoon_id: String,
     val source_id: String,
@@ -28,8 +28,14 @@ interface HistoryDao {
     @Insert(onConflict = OnConflictStrategy.REPLACE)
     suspend fun insert(history: History)
 
-    @Query("DELETE FROM history WHERE chapter_id = :chapterId")
-    suspend fun delete(chapterId: String)
+    @Query("SELECT * FROM history WHERE webtoon_id = :webtoonId AND source_id = :sourceId")
+    suspend fun getForWebtoon(webtoonId: String, sourceId: String): List<History>
+
+    @Query("SELECT * FROM history WHERE webtoon_id = :webtoonId AND source_id = :sourceId ORDER BY read_at DESC LIMIT 1")
+    fun getLatestForWebtoonFlow(webtoonId: String, sourceId: String): Flow<History?>
+
+    @Query("DELETE FROM history WHERE chapter_id = :chapterId AND webtoon_id = :webtoonId AND source_id = :sourceId")
+    suspend fun delete(chapterId: String, webtoonId: String, sourceId: String)
 
     @Query("DELETE FROM history")
     suspend fun deleteAll()

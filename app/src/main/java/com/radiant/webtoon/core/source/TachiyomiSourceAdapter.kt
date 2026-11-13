@@ -55,6 +55,8 @@ class TachiyomiSourceAdapter(
         BaseUrlResolver.rewriteUrl(url, defaultBaseUrl, baseUrl)
 
     companion object {
+        private const val MAX_REMEMBERED_PAGE_URLS = 1_024
+
         /**
          * Many extension sites only match search queries by exact substring, prefix,
          * or require ALL words to appear, so imprecise/partial multi-word queries
@@ -354,18 +356,24 @@ class TachiyomiSourceAdapter(
                         chapter = refreshChapterMemo(chapterId, mangaId!!) ?: chapter
                     }
 
-                    // Flame Comics: native __NEXT_DATA__ scraper — bypasses the extension APK.
+                    // Flame Comics: native __NEXT_DATA__ scraper first, the extension's own
+                    // getPageList as a fallback when the site layout changes under the scraper.
                     val httpSource = tachiyomiSource as? HttpSource
-                    val flameMatch = httpSource != null && isFlameComicsSource()
-                    if (flameMatch) {
-                        val chapterUrl = httpSource!!.getChapterUrl(chapter)
+                    if (httpSource != null && isFlameComicsSource()) {
+                        val chapterUrl = httpSource.getChapterUrl(chapter)
                         PageListDebugLogger.logStep(
                             step = "flame_comics_native_scraper_start",
                             strategy = "FlameComicsScraper.fetchPageList",
                             extra = mapOf("url" to chapterUrl),
                         )
-                        val scraped = FlameComicsScraper.from(httpSource, jsEngine)
-                            .fetchPageList(chapterUrl)
+                        val scraped = try {
+                            FlameComicsScraper.from(httpSource, jsEngine).fetchPageList(chapterUrl)
+                        } catch (e: kotlinx.coroutines.CancellationException) {
+                            throw e
+                        } catch (e: Exception) {
+                            Log.w(tag, "Flame scraper failed, falling back to extension", e)
+                            emptyList()
+                        }
                         if (scraped.isNotEmpty()) {
                             return@withSession ChapterPagesResult(
                                 pages = scraped,
@@ -376,29 +384,25 @@ class TachiyomiSourceAdapter(
                         }
                         PageListDebugLogger.logEmptyPageList(
                             step = "flame_comics_native_scraper_empty",
-                            strategy = "FlameComicsScraper.fetchPageList",
+                            strategy = "FlameComicsScraper.fetchPageList -> extension getPageList",
                             extra = mapOf("url" to chapterUrl),
-                        )
-                        return@withSession ChapterPagesResult(
-                            pages = emptyList(),
-                            httpStatus = null,
-                            chapterUrl = chapterUrl,
-                            cloudflareChallenge = false,
                         )
                     }
 
                     // Prefer suspend getPageList() — modern extensions (e.g. Asura Scans)
                     // override it and throw UnsupportedOperationException from pageListRequest.
-                    var pages = tryGetPageList(chapter)
+                    var pageListError: Exception? = null
+                    val recordError: (Exception) -> Unit = { pageListError = it }
+                    var pages = tryGetPageList(chapter, recordError)
                     if (pages.isEmpty() && !mangaId.isNullOrBlank() && chapter.memo.isEmpty()) {
                         // Generic recovery for any source that needs chapter memo.
                         chapter = refreshChapterMemo(chapterId, mangaId) ?: chapter
                         if (chapter.memo.isNotEmpty()) {
-                            pages = tryGetPageList(chapter)
+                            pages = tryGetPageList(chapter, recordError)
                         }
                     } else if (pages.isEmpty() && needsMemoRefresh(chapter, mangaId)) {
                         chapter = refreshChapterMemo(chapterId, mangaId!!) ?: chapter
-                        pages = tryGetPageList(chapter)
+                        pages = tryGetPageList(chapter, recordError)
                     }
 
                     val fetch = if (httpSource == null) {
@@ -461,6 +465,9 @@ class TachiyomiSourceAdapter(
                                 "cloudflareChallenge" to fetch.cloudflareChallenge.toString(),
                             ),
                         )
+                        // Surface the extension's own error instead of a silent empty chapter.
+                        val cause = pageListError
+                        if (cause != null && !fetch.cloudflareChallenge) throw cause
                     }
 
                     ChapterPagesResult(
@@ -542,16 +549,23 @@ class TachiyomiSourceAdapter(
         }
     }
 
-    private suspend fun tryGetPageList(chapter: SChapter): List<eu.kanade.tachiyomi.source.model.Page> {
+    /** Empty on failure; the failure is kept in [lastError] so an empty chapter can report why. */
+    private suspend fun tryGetPageList(
+        chapter: SChapter,
+        lastError: (Exception) -> Unit = {},
+    ): List<eu.kanade.tachiyomi.source.model.Page> {
         return try {
             tachiyomiSource.getPageList(chapter)
         } catch (e: UnsupportedOperationException) {
             emptyList()
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
         } catch (e: Exception) {
             PageListDebugLogger.logParseFailure(
                 step = "getPageList_exception",
                 error = e,
             )
+            lastError(e)
             emptyList()
         }
     }
@@ -575,21 +589,65 @@ class TachiyomiSourceAdapter(
         return FlameComicsScraper.matchesSource(name = name, id = id, baseUrl = baseUrl)
     }
 
-    private suspend fun mapPageUrls(pages: List<eu.kanade.tachiyomi.source.model.Page>): List<String> {
-        return pages.mapNotNull { page ->
+    /**
+     * Maps extension pages to refs without dropping slots: pages that only carry a page URL become
+     * [PageRefs.deferred] refs resolved lazily by [openPageImage] / [resolvePageImageUrl].
+     */
+    private fun mapPageUrls(pages: List<eu.kanade.tachiyomi.source.model.Page>): List<String> {
+        val isHttp = tachiyomiSource is HttpSource
+        return pages.mapIndexedNotNull { position, page ->
+            val imageUrl = page.imageUrl
             when {
-                !page.imageUrl.isNullOrEmpty() -> page.imageUrl
-                page.url.isNotEmpty() && tachiyomiSource is HttpSource -> {
-                    try {
-                        (tachiyomiSource as HttpSource).getImageUrl(page)
-                    } catch (e: Exception) {
-                        Log.e(tag, "Failed to resolve image URL for page ${page.index}", e)
-                        null
-                    }
+                !imageUrl.isNullOrEmpty() -> {
+                    if (page.url.isNotEmpty()) rememberPageUrl(imageUrl, page.url)
+                    imageUrl
                 }
-                else -> null
+                page.url.isNotEmpty() && isHttp -> PageRefs.deferred(position, page.url)
+                else -> {
+                    Log.w(tag, "Dropping page ${page.index}: no image or page URL")
+                    null
+                }
             }
         }
+    }
+
+    private val pageUrlByImageUrl = object : LinkedHashMap<String, String>(64, 0.75f, true) {
+        override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, String>?): Boolean =
+            size > MAX_REMEMBERED_PAGE_URLS
+    }
+
+    private fun rememberPageUrl(imageUrl: String, pageUrl: String) {
+        synchronized(pageUrlByImageUrl) { pageUrlByImageUrl[imageUrl] = pageUrl }
+    }
+
+    private fun rememberedPageUrl(imageUrl: String): String =
+        synchronized(pageUrlByImageUrl) { pageUrlByImageUrl[imageUrl] }.orEmpty()
+
+    /** Image URL for a page ref; deferred refs are resolved through the extension. */
+    suspend fun resolvePageImageUrl(ref: String): String = withContext(Dispatchers.IO) {
+        val deferred = PageRefs.parseDeferred(ref) ?: return@withContext ref
+        val http = tachiyomiSource as? HttpSource
+            ?: throw IllegalStateException("$name cannot resolve page URLs")
+        val page = eu.kanade.tachiyomi.source.model.Page(deferred.index, deferred.pageUrl)
+        http.getImageUrl(page).also { rememberPageUrl(it, deferred.pageUrl) }
+    }
+
+    /**
+     * Downloads a page the way Mihon does — `source.getImage(page)` with the extension's own
+     * client and `imageRequest` — so per-source interceptors, headers and descramblers apply.
+     * Returns null when the wrapped source is not an [HttpSource]. The caller closes the response.
+     */
+    suspend fun openPageImage(ref: String): okhttp3.Response? = withContext(Dispatchers.IO) {
+        val http = tachiyomiSource as? HttpSource ?: return@withContext null
+        val deferred = PageRefs.parseDeferred(ref)
+        val page = if (deferred != null) {
+            eu.kanade.tachiyomi.source.model.Page(deferred.index, deferred.pageUrl).apply {
+                imageUrl = http.getImageUrl(this)
+            }
+        } else {
+            eu.kanade.tachiyomi.source.model.Page(0, rememberedPageUrl(ref), ref)
+        }
+        http.getImage(page)
     }
 
     private suspend fun lockedMangaUpdate(

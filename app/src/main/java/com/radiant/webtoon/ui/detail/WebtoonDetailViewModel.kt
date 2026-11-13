@@ -6,6 +6,7 @@ import com.radiant.webtoon.core.database.DownloadStatus
 import com.radiant.webtoon.core.database.Manga
 import com.radiant.webtoon.core.database.MangaDao
 import com.radiant.webtoon.core.database.ChapterDao
+import com.radiant.webtoon.core.domain.ResumeTarget
 import com.radiant.webtoon.core.local.LocalSourceIds
 import com.radiant.webtoon.core.model.Webtoon
 import com.radiant.webtoon.core.repository.WebtoonRepository
@@ -56,6 +57,12 @@ class WebtoonDetailViewModel(
      */
     private val _chapters = MutableStateFlow<List<com.radiant.webtoon.core.database.Chapter>>(emptyList())
     val chapters: StateFlow<List<com.radiant.webtoon.core.database.Chapter>> = _chapters
+
+    /** What the Start / Resume button opens; null while the chapter list is empty. */
+    private val _resumeTarget = MutableStateFlow<ResumeTarget?>(null)
+    val resumeTarget: StateFlow<ResumeTarget?> = _resumeTarget.asStateFlow()
+
+    private var observeJobs: List<kotlinx.coroutines.Job> = emptyList()
 
     /** Latest Room manga row (null = not yet in DB). Used for first-open auto-fetch. */
     private val _mangaRow = MutableStateFlow<Manga?>(null)
@@ -108,10 +115,12 @@ class WebtoonDetailViewModel(
         lastAutoRefreshedId = null
         _error.value = null
         _isLoading.value = false
+        _resumeTarget.value = null
         clearSelection()
+        observeJobs.forEach { it.cancel() }
 
         // ── Observe Room continuously so UI is populated from local DB ──
-        viewModelScope.launch {
+        val mangaJob = viewModelScope.launch {
             mangaDao.getMangaFlow(webtoonId, sourceId).collect { manga ->
                 _mangaRow.value = manga
                 if (manga != null) {
@@ -125,8 +134,8 @@ class WebtoonDetailViewModel(
             }
         }
 
-        viewModelScope.launch {
-            chapterDao.getChaptersFlow(webtoonId).collect { chapters ->
+        val chaptersJob = viewModelScope.launch {
+            chapterDao.getChaptersFlow(webtoonId, sourceId).collect { chapters ->
                 _chapters.value = chapters
                 // Drop selections for chapters no longer present
                 val urls = chapters.map { it.url }.toSet()
@@ -135,8 +144,17 @@ class WebtoonDetailViewModel(
             }
         }
 
+        val resumeJob = viewModelScope.launch {
+            combine(
+                _chapters,
+                repository.latestHistoryForWebtoonFlow(webtoonId, sourceId),
+            ) { chapters, latest ->
+                ResumeTarget.resolve(chapters, latest?.chapter_id)
+            }.collect { _resumeTarget.value = it }
+        }
+
         // ── Reactively observe download statuses so icons update live ──
-        viewModelScope.launch {
+        val downloadsJob = viewModelScope.launch {
             val dao = downloadDao
             val indexDao = downloadedChapterDao
             if (dao != null && indexDao != null) {
@@ -156,6 +174,7 @@ class WebtoonDetailViewModel(
                 updateDownloadStatuses()
             }
         }
+        observeJobs = listOf(mangaJob, chaptersJob, resumeJob, downloadsJob)
     }
 
     /**
@@ -233,7 +252,7 @@ class WebtoonDetailViewModel(
             // Upsert webtoon into Room — preserve existing favorite status
             val existing = mangaDao.getManga(webtoonId, sourceId)
             val isFav = existing?.favorite ?: false
-            mangaDao.insert(
+            mangaDao.upsertFetchedMetadata(
                 Manga(
                     url = detail.id,
                     source = sourceId,
@@ -245,11 +264,12 @@ class WebtoonDetailViewModel(
                     genre = detail.genres.joinToString(", "),
                     favorite = isFav,
                     initialized = true,
-                    last_update = System.currentTimeMillis()
+                    last_update = System.currentTimeMillis(),
+                    date_added = existing?.date_added ?: 0L,
                 )
             )
 
-            val existingChapters = chapterDao.getChapters(webtoonId).associateBy { it.url }
+            val existingChapters = chapterDao.getChapters(webtoonId, sourceId).associateBy { it.url }
             val dbChapters = modelChapters.map { ch ->
                 val prior = existingChapters[ch.id]
                 com.radiant.webtoon.core.database.Chapter(
@@ -260,6 +280,7 @@ class WebtoonDetailViewModel(
                     read = prior?.read ?: false,
                     bookmark = prior?.bookmark ?: false,
                     last_page_read = prior?.last_page_read ?: 0,
+                    last_page_offset = prior?.last_page_offset ?: 0,
                     date_fetch = prior?.date_fetch ?: 0L,
                     date_upload = com.radiant.webtoon.core.util.ChapterDates.millisFrom(
                         rawDate = ch.date,
@@ -348,7 +369,7 @@ class WebtoonDetailViewModel(
         viewModelScope.launch {
             val webtoon = _webtoon.value ?: return@launch
             val statuses = _downloadTasks.value
-            val chapters = chapterDao.getChapters(currentWebtoonId)
+            val chapters = chapterDao.getChapters(currentWebtoonId, currentSourceId)
                 .sortedBy { it.chapter_number }
                 .filter { statuses[it.url] != DownloadStatus.COMPLETED }
             enqueueChapters(context, webtoon, chapters)
@@ -359,7 +380,7 @@ class WebtoonDetailViewModel(
         if (currentSourceId == LocalSourceIds.LOCAL_SOURCE_ID) return
         viewModelScope.launch {
             val webtoon = _webtoon.value ?: return@launch
-            val chapters = chapterDao.getChapters(currentWebtoonId)
+            val chapters = chapterDao.getChapters(currentWebtoonId, currentSourceId)
                 .filter { !it.read }
                 .sortedBy { it.chapter_number }
             enqueueChapters(context, webtoon, chapters)
@@ -370,7 +391,7 @@ class WebtoonDetailViewModel(
         if (currentSourceId == LocalSourceIds.LOCAL_SOURCE_ID) return
         viewModelScope.launch {
             val webtoon = _webtoon.value ?: return@launch
-            val chapters = chapterDao.getChapters(currentWebtoonId)
+            val chapters = chapterDao.getChapters(currentWebtoonId, currentSourceId)
                 .filter { !it.read }
                 .sortedBy { it.chapter_number }
                 .take(count)
@@ -383,7 +404,7 @@ class WebtoonDetailViewModel(
         if (chapterIds.isEmpty() || currentSourceId == LocalSourceIds.LOCAL_SOURCE_ID) return
         viewModelScope.launch {
             val webtoon = _webtoon.value ?: return@launch
-            val chapters = chapterDao.getChapters(currentWebtoonId)
+            val chapters = chapterDao.getChapters(currentWebtoonId, currentSourceId)
                 .filter { chapterIds.contains(it.url) }
                 .sortedBy { it.chapter_number }
             enqueueChapters(context, webtoon, chapters)
@@ -428,7 +449,7 @@ class WebtoonDetailViewModel(
     fun markChaptersRead(chapterIds: Set<String>, read: Boolean) {
         if (chapterIds.isEmpty()) return
         viewModelScope.launch {
-            chapterDao.updateRead(currentWebtoonId, chapterIds.toList(), read)
+            chapterDao.updateRead(currentWebtoonId, currentSourceId, chapterIds.toList(), read)
         }
     }
 
@@ -443,7 +464,7 @@ class WebtoonDetailViewModel(
         val ids = _selectedChapterIds.value
         if (ids.isEmpty()) return
         viewModelScope.launch {
-            chapterDao.updateBookmark(currentWebtoonId, ids.toList(), bookmark)
+            chapterDao.updateBookmark(currentWebtoonId, currentSourceId, ids.toList(), bookmark)
             clearSelection()
         }
     }

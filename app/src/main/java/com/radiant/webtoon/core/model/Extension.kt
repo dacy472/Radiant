@@ -35,8 +35,20 @@ sealed class Extension {
         val downloadUrl: String? = null,
         val extensionLibVersion: String? = null,
         override val libCompatibility: ExtensionLibCompatibility = ExtensionLibCompatibility.Compatible,
+        /** Non-null when a newer remote build exists ([hasUpdate] is true in that case). */
+        val updateAvailable: UpdateAvailable? = null,
     ) : Extension() {
         override val isInstalled: Boolean = true
+
+        /**
+         * Update status for an installed extension: the remote build that supersedes
+         * [Installed.versionCode], and the repository that offers it.
+         */
+        data class UpdateAvailable(
+            val remoteVersionCode: Long,
+            val remoteVersionName: String? = null,
+            val repoUrl: String? = null,
+        )
     }
 
     /**

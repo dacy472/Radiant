@@ -11,6 +11,7 @@ export { serializeSourceResult } from './runtime/serialization.js';
 export { downloadBundle } from './runtime/downloadBundle.js';
 export { detectBundleFormat } from './runtime/detectBundleFormat.js';
 export { ExtensionBundleError } from './runtime/errors.js';
+export { assertTrustedArtifact, hasHostFsMarker, HOST_FS_MARKER, TRUSTED_PUBLISHERS, } from './runtime/artifactTrust.js';
 export { validateSourceInstance, resolveSourceExport } from './runtime/resolveSourceExport.js';
 export { assertSourceContract, isSource } from './source.js';
 //# sourceMappingURL=index.js.map

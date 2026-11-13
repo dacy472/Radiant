@@ -49,7 +49,18 @@ fun MigrationListScreen(
     Scaffold(
         topBar = {
             TopAppBar(
-                title = { Text("Select Comic to Migrate") },
+                title = {
+                    val sourceName = repository.extensionManager.getSource(sourceId)?.name ?: "Unavailable source"
+                    val count = mangas.distinctBy { it.url }.size
+                    Column {
+                        Text("Select Comic to Migrate")
+                        Text(
+                            text = "$sourceName · $count title${if (count == 1) "" else "s"}",
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                },
                 navigationIcon = {
                     IconButton(onClick = onBackClick) {
                         Icon(Icons.Default.ArrowBack, contentDescription = "Back")

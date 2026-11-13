@@ -219,7 +219,7 @@ class WebtoonRepository(
             favorite = true,
             date_added = System.currentTimeMillis()
         )
-        mangaDao.insert(manga)
+        mangaDao.upsertFetchedMetadata(manga)
     }
 
     suspend fun removeFromLibrary(url: String, source: String) = withContext(Dispatchers.IO) {
@@ -272,8 +272,12 @@ class WebtoonRepository(
 
     // ─── Chapter tracking operations ───
 
-    suspend fun getChaptersForManga(mangaId: String): List<Chapter> = withContext(Dispatchers.IO) {
-        chapterDao.getChapters(mangaId)
+    suspend fun getChaptersForManga(mangaId: String, sourceId: String): List<Chapter> = withContext(Dispatchers.IO) {
+        chapterDao.getChapters(mangaId, sourceId)
+    }
+
+    suspend fun getChapter(url: String, mangaId: String, sourceId: String): Chapter? = withContext(Dispatchers.IO) {
+        chapterDao.getChapter(url, mangaId, sourceId)
     }
 
     fun allChaptersFlow(): Flow<List<Chapter>> = chapterDao.getAllChaptersFlow()
@@ -287,7 +291,7 @@ class WebtoonRepository(
     }
 
     suspend fun markChapterReadLog(history: History, skipHistory: Boolean = false) = withContext(Dispatchers.IO) {
-        chapterDao.updateRead(history.chapter_id, history.webtoon_id, true)
+        chapterDao.updateRead(history.chapter_id, history.webtoon_id, history.source_id, true)
         if (!skipHistory) {
             historyDao.insert(history)
         }
@@ -299,10 +303,10 @@ class WebtoonRepository(
         }
     }
 
-    suspend fun markChapterRead(url: String, mangaId: String, isRead: Boolean = true) = withContext(Dispatchers.IO) {
-        chapterDao.updateRead(url, mangaId, isRead)
+    suspend fun markChapterRead(url: String, mangaId: String, sourceId: String, isRead: Boolean = true) = withContext(Dispatchers.IO) {
+        chapterDao.updateRead(url, mangaId, sourceId, isRead)
         if (!isRead) {
-            historyDao.delete(url)
+            historyDao.delete(url, mangaId, sourceId)
         }
     }
 
@@ -310,30 +314,94 @@ class WebtoonRepository(
         return chapterDao.getRecentUpdates()
     }
 
-    suspend fun updateLastPageRead(url: String, mangaId: String, page: Int) = withContext(Dispatchers.IO) {
-        chapterDao.updateLastPageRead(url, mangaId, page)
+    suspend fun updateLastPageRead(url: String, mangaId: String, sourceId: String, page: Int) = withContext(Dispatchers.IO) {
+        chapterDao.updateLastPageRead(url, mangaId, sourceId, page)
+    }
+
+    suspend fun updateReadPosition(url: String, mangaId: String, sourceId: String, page: Int, offset: Int) =
+        withContext(Dispatchers.IO) {
+            chapterDao.updateReadPosition(url, mangaId, sourceId, page, offset.coerceIn(0, 9_999))
+        }
+
+    fun latestHistoryForWebtoonFlow(webtoonId: String, sourceId: String): Flow<History?> =
+        historyDao.getLatestForWebtoonFlow(webtoonId, sourceId)
+
+    private val migrateWebtoonUseCase by lazy {
+        com.radiant.webtoon.core.domain.usecase.MigrateWebtoonUseCase(database)
     }
 
     /**
-     * Atomically migrates a manga from one source/URL to another.
+     * Atomically migrates library state (progress, bookmarks, history, categories, favorite) from one
+     * source entry to another. Single implementation lives in
+     * [com.radiant.webtoon.core.domain.usecase.MigrateWebtoonUseCase]; the target must already be in
+     * Room with chapters loaded — call [loadWebtoonForMigration] first.
      */
     suspend fun executeMigration(
         oldUrl: String,
         oldSource: String,
         newUrl: String,
         newSource: String,
-        newThumbnail: String,
-        newChapters: List<Chapter>
-    ) {
-        database.withTransaction {
-            // 1. Delete old chapters
-            chapterDao.deleteByManga(oldUrl)
-            
-            // 2. Insert new synced chapters
-            chapterDao.insertAll(newChapters)
-            
-            // 3. Update the Manga pointer (URL, Source, Thumbnail)
-            mangaDao.updateMangaMigrationData(oldUrl, oldSource, newSource, newUrl, newThumbnail)
+        options: com.radiant.webtoon.core.domain.usecase.MigrationOptions =
+            com.radiant.webtoon.core.domain.usecase.MigrationOptions(),
+    ): com.radiant.webtoon.core.domain.usecase.MigrationResult = withContext(Dispatchers.IO) {
+        migrateWebtoonUseCase(
+            oldId = com.radiant.webtoon.core.domain.usecase.MangaIdentifier(oldUrl, oldSource),
+            newId = com.radiant.webtoon.core.domain.usecase.MangaIdentifier(newUrl, newSource),
+            options = options,
+        )
+    }
+
+    /**
+     * Fetches [webtoonId] and its chapter list from [sourceId] (network, outside any DB transaction)
+     * and stores them in Room without changing the library flag, so a migration can run afterwards.
+     * Existing per-chapter state for the same chapter urls is preserved.
+     */
+    suspend fun loadWebtoonForMigration(sourceId: String, webtoonId: String): Manga {
+        val (detail, modelChapters) = getWebtoonDetailAndChapters(sourceId, webtoonId)
+        return withContext(Dispatchers.IO) {
+            database.withTransaction {
+                val existing = mangaDao.getManga(webtoonId, sourceId)
+                mangaDao.upsertFetchedMetadata(
+                    Manga(
+                        url = webtoonId,
+                        source = sourceId,
+                        title = detail.title,
+                        author = detail.author,
+                        description = detail.description,
+                        status = detail.status,
+                        thumbnail_url = detail.thumbnail,
+                        genre = detail.genres.joinToString(", "),
+                        favorite = existing?.favorite ?: false,
+                        initialized = true,
+                        last_update = System.currentTimeMillis(),
+                        date_added = existing?.date_added ?: 0L,
+                    ),
+                )
+                val prior = chapterDao.getChapters(webtoonId, sourceId).associateBy { it.url }
+                chapterDao.insertAll(
+                    modelChapters.map { ch ->
+                        val old = prior[ch.id]
+                        Chapter(
+                            url = ch.id,
+                            manga_id = webtoonId,
+                            name = ch.title,
+                            scanlator = old?.scanlator,
+                            read = old?.read ?: false,
+                            bookmark = old?.bookmark ?: false,
+                            last_page_read = old?.last_page_read ?: 0,
+                            last_page_offset = old?.last_page_offset ?: 0,
+                            date_fetch = old?.date_fetch ?: 0L,
+                            date_upload = com.radiant.webtoon.core.util.ChapterDates.millisFrom(
+                                rawDate = ch.date,
+                                millis = ch.dateUploadMillis,
+                            ).takeIf { it > 0L } ?: old?.date_upload ?: 0L,
+                            chapter_number = ch.number?.toFloat() ?: -1f,
+                            source = sourceId,
+                        )
+                    },
+                )
+                mangaDao.getManga(webtoonId, sourceId) ?: error("Failed to store $webtoonId ($sourceId)")
+            }
         }
     }
 

@@ -1,4 +1,4 @@
-package com.radiant.webtoon.core.service
+﻿package com.radiant.webtoon.core.service
 
 import android.content.Context
 import android.util.Log
@@ -15,7 +15,7 @@ import kotlinx.coroutines.withContext
 import java.util.concurrent.TimeUnit
 
 /**
- * Background task that checks for extension updates every 12 hours.
+ * Background task that checks for extension updates every 12-24 hours (24h period, 12h flex window), across all repos.
  * Requires network connectivity; defers silently when offline.
  */
 class ExtensionUpdateWorker(
@@ -30,7 +30,7 @@ class ExtensionUpdateWorker(
             app.extensionManager.runBackgroundExtensionUpdateCheck()
             Log.d(TAG, "Extension update check complete")
         } catch (e: Exception) {
-            // Fail silently — no user-facing error for background network checks
+            // Fail silently â€” no user-facing error for background network checks
             Log.w(TAG, "Extension update check failed (ignored): ${e.message}")
         }
         Result.success()
@@ -39,28 +39,32 @@ class ExtensionUpdateWorker(
     companion object {
         const val WORK_NAME = "extension_update_check"
         private const val TAG = "ExtensionUpdateWorker"
-        private const val CHECK_INTERVAL_HOURS = 12L
+        private const val CHECK_INTERVAL_HOURS = 24L
+        private const val FLEX_INTERVAL_HOURS = 12L
 
         private fun networkConstraints(): Constraints =
             Constraints.Builder()
                 .setRequiredNetworkType(NetworkType.CONNECTED)
                 .build()
 
-        /** Schedule (or keep) the 12-hour periodic update check. */
+        /**
+         * Schedule the periodic update check: 24h repeat, 12h flex, network-connected. [UPDATE] applies
+         * interval/flex changes to an already-enqueued worker without resetting an unchanged one.
+         */
         fun schedule(context: Context) {
             val request = PeriodicWorkRequestBuilder<ExtensionUpdateWorker>(
                 CHECK_INTERVAL_HOURS,
-                TimeUnit.HOURS,
+                TimeUnit.HOURS, FLEX_INTERVAL_HOURS, TimeUnit.HOURS,
             )
                 .setConstraints(networkConstraints())
                 .build()
 
             WorkManager.getInstance(context).enqueueUniquePeriodicWork(
                 WORK_NAME,
-                ExistingPeriodicWorkPolicy.KEEP,
+                ExistingPeriodicWorkPolicy.UPDATE,
                 request,
             )
-            Log.d(TAG, "Scheduled extension update checks every ${CHECK_INTERVAL_HOURS}h")
+            Log.d(TAG, "Scheduled extension update checks every ${CHECK_INTERVAL_HOURS}h (flex ${FLEX_INTERVAL_HOURS}h)")
         }
 
         fun cancel(context: Context) {
@@ -68,3 +72,4 @@ class ExtensionUpdateWorker(
         }
     }
 }
+

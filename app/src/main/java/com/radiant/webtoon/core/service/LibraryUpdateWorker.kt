@@ -51,7 +51,7 @@ class LibraryUpdateWorker(
                     val remoteChapters = com.radiant.webtoon.core.concurrent.AppWorkQueues.withSourceNetwork {
                         source.getChapterList(manga.url)
                     }
-                    val existingChapters = repository.getChaptersForManga(manga.url)
+                    val existingChapters = repository.getChaptersForManga(manga.url, manga.source)
                     val existingUrls = existingChapters.map { it.url }.toSet()
 
                     val newChapters = remoteChapters

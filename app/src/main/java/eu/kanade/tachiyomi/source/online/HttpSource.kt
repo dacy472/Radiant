@@ -2,6 +2,7 @@ package eu.kanade.tachiyomi.source.online
 
 import eu.kanade.tachiyomi.network.NetworkHelper
 import eu.kanade.tachiyomi.network.UserAgentInterceptor
+import eu.kanade.tachiyomi.network.await
 import eu.kanade.tachiyomi.source.CatalogueSource
 import eu.kanade.tachiyomi.source.model.*
 import okhttp3.Headers
@@ -288,6 +289,20 @@ abstract class HttpSource : CatalogueSource {
             .url(url)
             .headers(headers)
             .build()
+    }
+
+    /**
+     * Mihon source-api: downloads [page] with this source's own [client] and [imageRequest], so
+     * per-extension interceptors (descramblers, signed URLs, cookies) run exactly as in Mihon.
+     * Extensions may override it. Throws on a non-2xx response.
+     */
+    open suspend fun getImage(page: Page): Response {
+        val response = client.newCall(imageRequest(page)).await()
+        if (!response.isSuccessful) {
+            response.close()
+            throw java.io.IOException("HTTP error ${response.code}")
+        }
+        return response
     }
 
     // ─── URL Helpers ───

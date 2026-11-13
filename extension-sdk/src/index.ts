@@ -39,6 +39,13 @@ export { detectBundleFormat } from './runtime/detectBundleFormat.js';
 export type { BundleFormat } from './runtime/detectBundleFormat.js';
 export { ExtensionBundleError } from './runtime/errors.js';
 export type { ExtensionBundleErrorCode } from './runtime/errors.js';
+export {
+  assertTrustedArtifact,
+  hasHostFsMarker,
+  HOST_FS_MARKER,
+  TRUSTED_PUBLISHERS,
+} from './runtime/artifactTrust.js';
+export type { ArtifactTrustInput } from './runtime/artifactTrust.js';
 export { validateSourceInstance, resolveSourceExport } from './runtime/resolveSourceExport.js';
 
 export type {

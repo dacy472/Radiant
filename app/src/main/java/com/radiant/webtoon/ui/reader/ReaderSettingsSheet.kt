@@ -17,6 +17,7 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
+import com.radiant.webtoon.ui.reader.viewer.ReadingMode
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -54,16 +55,20 @@ fun ReaderSettingsSheet(
                 modifier = Modifier.padding(top = 8.dp, bottom = 12.dp)
             )
             
-            val modes = listOf("Vertical", "Left to Right", "Right to Left")
-            SingleChoiceSegmentedButtonRow(modifier = Modifier.fillMaxWidth()) {
-                modes.forEachIndexed { index, label ->
-                    SegmentedButton(
-                        selected = readingMode == index,
-                        onClick = { viewModel.setReadingMode(index) },
-                        shape = SegmentedButtonDefaults.itemShape(index = index, count = modes.size)
-                    ) {
-                        Text(label, style = MaterialTheme.typography.bodySmall)
-                    }
+            ReadingMode.entries.forEach { mode ->
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .selectable(
+                            selected = readingMode == mode,
+                            onClick = { viewModel.setReadingMode(mode) },
+                            role = Role.RadioButton,
+                        )
+                        .padding(vertical = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    RadioButton(selected = readingMode == mode, onClick = null)
+                    Text(mode.label, modifier = Modifier.padding(start = 12.dp))
                 }
             }
 
@@ -125,7 +130,7 @@ fun ReaderSettingsSheet(
                         style = MaterialTheme.typography.bodyLarge
                     )
                     Text(
-                        text = "Automatically trims white space",
+                        text = "Strips uniform-colour edges while decoding",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
                     )

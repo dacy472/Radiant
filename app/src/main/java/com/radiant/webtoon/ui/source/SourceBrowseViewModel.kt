@@ -6,6 +6,8 @@ import com.radiant.webtoon.core.model.Webtoon
 import com.radiant.webtoon.core.source.ExtensionManager
 import com.radiant.webtoon.core.source.Source
 import eu.kanade.tachiyomi.source.model.FilterList
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.launch
@@ -33,6 +35,8 @@ class SourceBrowseViewModel(
     private var currentQuery: String = ""
     private var activeFilters: FilterList = FilterList()
     private var repairAttempted = false
+    private var loadJob: Job? = null
+    private val sessions = BrowseSessionTracker()
 
     val supportsLatest: Boolean
         get() = source?.capabilities?.supportsLatest == true
@@ -73,35 +77,46 @@ class SourceBrowseViewModel(
         if (!hasNextPage && currentPage > 1) return
         if (isLoadingPage) return
 
-        viewModelScope.launch {
+        val session = sessions.current ?: sessions.reset(
+            sourceId = sourceId,
+            tab = _selectedTab.value,
+            query = currentQuery,
+            filtersFingerprint = activeFilters.toString(),
+        )
+        val page = currentPage
+        loadJob = viewModelScope.launch {
             isLoadingPage = true
-            if (currentPage == 1) {
+            if (page == 1) {
                 _state.value = BrowseState.Loading
             }
 
             var skipLoadingReset = false
             try {
-                when (_selectedTab.value) {
+                when (session.tab) {
                     BrowseTab.POPULAR -> {
-                        val response = s.fetchPopularManga(currentPage)
+                        val response = s.fetchPopularManga(page)
+                        if (!sessions.isCurrent(session)) return@launch
                         appendUniqueWebtoons(response.webtoons)
                         hasNextPage = response.hasNextPage
                     }
                     BrowseTab.LATEST -> {
-                        val response = s.fetchLatestManga(currentPage)
+                        val response = s.fetchLatestManga(page)
+                        if (!sessions.isCurrent(session)) return@launch
                         appendUniqueWebtoons(response.webtoons)
                         hasNextPage = response.hasNextPage
                     }
                     BrowseTab.SEARCH -> {
                         if (currentQuery.isBlank()) {
+                            if (!sessions.isCurrent(session)) return@launch
                             _webtoons.value = emptyList()
                             hasNextPage = false
                         } else {
                             val response = s.fetchSearchManga(
-                                page = currentPage,
+                                page = page,
                                 query = currentQuery,
                                 filters = activeFilters
                             )
+                            if (!sessions.isCurrent(session)) return@launch
                             val newWebtoons = response.mangas.map { smanga ->
                                 Webtoon(
                                     id = smanga.url,
@@ -115,21 +130,21 @@ class SourceBrowseViewModel(
                         }
                     }
                 }
-                currentPage++
-                _state.value = BrowseState.Success
+                if (sessions.isCurrent(session)) {
+                    currentPage = page + 1
+                    _state.value = BrowseState.Success
+                }
             } catch (e: Throwable) {
-                if (e is kotlinx.coroutines.CancellationException) throw e
+                if (e is CancellationException) throw e
+                if (!sessions.isCurrent(session)) return@launch
                 if (!repairAttempted && isSerializationFailure(e)) {
                     repairAttempted = true
                     val repaired = extensionManager.repairSourceAfterSerializationFailure(sourceId)
                     if (repaired) {
                         skipLoadingReset = true
                         source = extensionManager.getSource(sourceId)
-                        currentPage = 1
-                        _webtoons.value = emptyList()
-                        hasNextPage = true
                         isLoadingPage = false
-                        loadNextPage()
+                        resetAndLoad()
                         return@launch
                     }
                 }
@@ -143,14 +158,13 @@ class SourceBrowseViewModel(
                 } else {
                     BrowseState.Error(e.message ?: "Failed to load")
                 }
-                // Keep previously loaded pages; only show error when the first page fails
                 if (_webtoons.value.isEmpty()) {
                     _state.value = errorState
                 } else {
                     _state.value = BrowseState.Success
                 }
             } finally {
-                if (!skipLoadingReset) {
+                if (!skipLoadingReset && sessions.isCurrent(session)) {
                     isLoadingPage = false
                 }
             }
@@ -177,6 +191,13 @@ class SourceBrowseViewModel(
     }
 
     private fun resetAndLoad() {
+        loadJob?.cancel()
+        sessions.reset(
+            sourceId = sourceId,
+            tab = _selectedTab.value,
+            query = currentQuery,
+            filtersFingerprint = activeFilters.toString(),
+        )
         currentPage = 1
         hasNextPage = true
         isLoadingPage = false

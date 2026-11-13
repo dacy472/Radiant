@@ -16,6 +16,20 @@
 local.properties
 
 gradle-8.6/
+/.gradle-isolated
+/.kotlin
+
+# Local build output captures
+/build-*.txt
+/compile-*.txt
+/*.log
+
+# Release APKs are published on GitHub Releases, not committed
+/app/release/
+
+# Local tooling: Cursor workspace state and the generated graphify knowledge graph
+/.cursor/
+/graphify-out/
 
 # Node.js
 node.exe

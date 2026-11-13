@@ -1,0 +1,697 @@
+{
+  "formatVersion": 1,
+  "database": {
+    "version": 14,
+    "identityHash": "de6d61c2f96ff72300e0a5167c9ef771",
+    "entities": [
+      {
+        "tableName": "mangas",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`url` TEXT NOT NULL, `source` TEXT NOT NULL, `title` TEXT NOT NULL, `artist` TEXT, `author` TEXT, `description` TEXT, `genre` TEXT, `status` TEXT, `thumbnail_url` TEXT, `initialized` INTEGER NOT NULL, `favorite` INTEGER NOT NULL, `date_added` INTEGER NOT NULL, `last_update` INTEGER NOT NULL, PRIMARY KEY(`url`, `source`))",
+        "fields": [
+          {
+            "fieldPath": "url",
+            "columnName": "url",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "source",
+            "columnName": "source",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "artist",
+            "columnName": "artist",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "author",
+            "columnName": "author",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "description",
+            "columnName": "description",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "genre",
+            "columnName": "genre",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "thumbnail_url",
+            "columnName": "thumbnail_url",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "initialized",
+            "columnName": "initialized",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "favorite",
+            "columnName": "favorite",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "date_added",
+            "columnName": "date_added",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "last_update",
+            "columnName": "last_update",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "url",
+            "source"
+          ]
+        }
+      },
+      {
+        "tableName": "chapters",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`url` TEXT NOT NULL, `manga_id` TEXT NOT NULL, `name` TEXT NOT NULL, `scanlator` TEXT, `read` INTEGER NOT NULL, `bookmark` INTEGER NOT NULL, `last_page_read` INTEGER NOT NULL, `date_fetch` INTEGER NOT NULL, `date_upload` INTEGER NOT NULL, `chapter_number` REAL NOT NULL, `source` TEXT NOT NULL, PRIMARY KEY(`source`, `manga_id`, `url`))",
+        "fields": [
+          {
+            "fieldPath": "url",
+            "columnName": "url",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "manga_id",
+            "columnName": "manga_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "name",
+            "columnName": "name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "scanlator",
+            "columnName": "scanlator",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "read",
+            "columnName": "read",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "bookmark",
+            "columnName": "bookmark",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "last_page_read",
+            "columnName": "last_page_read",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "date_fetch",
+            "columnName": "date_fetch",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "date_upload",
+            "columnName": "date_upload",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "chapter_number",
+            "columnName": "chapter_number",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "source",
+            "columnName": "source",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "source",
+            "manga_id",
+            "url"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_chapters_manga_id_source",
+            "unique": false,
+            "columnNames": [
+              "manga_id",
+              "source"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_chapters_manga_id_source` ON `${TABLE_NAME}` (`manga_id`, `source`)"
+          }
+        ]
+      },
+      {
+        "tableName": "history",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`chapter_id` TEXT NOT NULL, `webtoon_id` TEXT NOT NULL, `source_id` TEXT NOT NULL, `chapter_title` TEXT NOT NULL, `webtoon_title` TEXT NOT NULL, `webtoon_thumbnail` TEXT, `read_at` INTEGER NOT NULL, PRIMARY KEY(`source_id`, `webtoon_id`, `chapter_id`))",
+        "fields": [
+          {
+            "fieldPath": "chapter_id",
+            "columnName": "chapter_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "webtoon_id",
+            "columnName": "webtoon_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "source_id",
+            "columnName": "source_id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "chapter_title",
+            "columnName": "chapter_title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "webtoon_title",
+            "columnName": "webtoon_title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "webtoon_thumbnail",
+            "columnName": "webtoon_thumbnail",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "read_at",
+            "columnName": "read_at",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "source_id",
+            "webtoon_id",
+            "chapter_id"
+          ]
+        }
+      },
+      {
+        "tableName": "downloads",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`chapterId` TEXT NOT NULL, `sourceId` TEXT NOT NULL, `webtoonId` TEXT NOT NULL, `webtoonTitle` TEXT NOT NULL, `chapterTitle` TEXT NOT NULL, `status` TEXT NOT NULL, `progress` INTEGER NOT NULL, `totalPages` INTEGER NOT NULL, `downloadedPages` INTEGER NOT NULL, `localPath` TEXT, `orderIndex` INTEGER NOT NULL, `dateAdded` INTEGER NOT NULL, PRIMARY KEY(`chapterId`, `sourceId`))",
+        "fields": [
+          {
+            "fieldPath": "chapterId",
+            "columnName": "chapterId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceId",
+            "columnName": "sourceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "webtoonId",
+            "columnName": "webtoonId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "webtoonTitle",
+            "columnName": "webtoonTitle",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "chapterTitle",
+            "columnName": "chapterTitle",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "progress",
+            "columnName": "progress",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "totalPages",
+            "columnName": "totalPages",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "downloadedPages",
+            "columnName": "downloadedPages",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "localPath",
+            "columnName": "localPath",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "orderIndex",
+            "columnName": "orderIndex",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "dateAdded",
+            "columnName": "dateAdded",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "chapterId",
+            "sourceId"
+          ]
+        }
+      },
+      {
+        "tableName": "extension_repos",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`baseUrl` TEXT NOT NULL, `name` TEXT NOT NULL, `shortName` TEXT, `dateAdded` INTEGER NOT NULL, PRIMARY KEY(`baseUrl`))",
+        "fields": [
+          {
+            "fieldPath": "baseUrl",
+            "columnName": "baseUrl",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "name",
+            "columnName": "name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "shortName",
+            "columnName": "shortName",
+            "affinity": "TEXT"
+          },
+          {
+            "fieldPath": "dateAdded",
+            "columnName": "dateAdded",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "baseUrl"
+          ]
+        }
+      },
+      {
+        "tableName": "installed_extensions",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` TEXT NOT NULL, `name` TEXT NOT NULL, `isTrusted` INTEGER NOT NULL, `dateInstalled` INTEGER NOT NULL, `versionCode` INTEGER NOT NULL, PRIMARY KEY(`id`))",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "name",
+            "columnName": "name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "isTrusted",
+            "columnName": "isTrusted",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "dateInstalled",
+            "columnName": "dateInstalled",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "versionCode",
+            "columnName": "versionCode",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "id"
+          ]
+        }
+      },
+      {
+        "tableName": "categories",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `name` TEXT NOT NULL, `order` INTEGER NOT NULL, `flags` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "name",
+            "columnName": "name",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "order",
+            "columnName": "order",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "flags",
+            "columnName": "flags",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        }
+      },
+      {
+        "tableName": "library_categories_m2m",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`webtoonId` TEXT NOT NULL, `sourceId` TEXT NOT NULL, `categoryId` INTEGER NOT NULL, PRIMARY KEY(`webtoonId`, `sourceId`, `categoryId`), FOREIGN KEY(`webtoonId`, `sourceId`) REFERENCES `mangas`(`url`, `source`) ON UPDATE NO ACTION ON DELETE CASCADE , FOREIGN KEY(`categoryId`) REFERENCES `categories`(`id`) ON UPDATE NO ACTION ON DELETE CASCADE )",
+        "fields": [
+          {
+            "fieldPath": "webtoonId",
+            "columnName": "webtoonId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceId",
+            "columnName": "sourceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "categoryId",
+            "columnName": "categoryId",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "webtoonId",
+            "sourceId",
+            "categoryId"
+          ]
+        },
+        "indices": [
+          {
+            "name": "index_library_categories_m2m_webtoonId_sourceId",
+            "unique": false,
+            "columnNames": [
+              "webtoonId",
+              "sourceId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_library_categories_m2m_webtoonId_sourceId` ON `${TABLE_NAME}` (`webtoonId`, `sourceId`)"
+          },
+          {
+            "name": "index_library_categories_m2m_categoryId",
+            "unique": false,
+            "columnNames": [
+              "categoryId"
+            ],
+            "orders": [],
+            "createSql": "CREATE INDEX IF NOT EXISTS `index_library_categories_m2m_categoryId` ON `${TABLE_NAME}` (`categoryId`)"
+          }
+        ],
+        "foreignKeys": [
+          {
+            "table": "mangas",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "webtoonId",
+              "sourceId"
+            ],
+            "referencedColumns": [
+              "url",
+              "source"
+            ]
+          },
+          {
+            "table": "categories",
+            "onDelete": "CASCADE",
+            "onUpdate": "NO ACTION",
+            "columns": [
+              "categoryId"
+            ],
+            "referencedColumns": [
+              "id"
+            ]
+          }
+        ]
+      },
+      {
+        "tableName": "tracks",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`mangaUrl` TEXT NOT NULL, `mangaSource` TEXT NOT NULL, `trackerId` TEXT NOT NULL, `remoteId` TEXT NOT NULL, `title` TEXT NOT NULL, `lastChapter` REAL NOT NULL, `status` TEXT NOT NULL, PRIMARY KEY(`mangaUrl`, `mangaSource`, `trackerId`))",
+        "fields": [
+          {
+            "fieldPath": "mangaUrl",
+            "columnName": "mangaUrl",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mangaSource",
+            "columnName": "mangaSource",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "trackerId",
+            "columnName": "trackerId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "remoteId",
+            "columnName": "remoteId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "title",
+            "columnName": "title",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "lastChapter",
+            "columnName": "lastChapter",
+            "affinity": "REAL",
+            "notNull": true
+          },
+          {
+            "fieldPath": "status",
+            "columnName": "status",
+            "affinity": "TEXT",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "mangaUrl",
+            "mangaSource",
+            "trackerId"
+          ]
+        }
+      },
+      {
+        "tableName": "upcoming_releases",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`id` INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, `mangaUrl` TEXT NOT NULL, `mangaTitle` TEXT NOT NULL, `sourceId` TEXT NOT NULL, `chapterName` TEXT NOT NULL, `releaseAt` INTEGER NOT NULL)",
+        "fields": [
+          {
+            "fieldPath": "id",
+            "columnName": "id",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mangaUrl",
+            "columnName": "mangaUrl",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "mangaTitle",
+            "columnName": "mangaTitle",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceId",
+            "columnName": "sourceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "chapterName",
+            "columnName": "chapterName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "releaseAt",
+            "columnName": "releaseAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": true,
+          "columnNames": [
+            "id"
+          ]
+        }
+      },
+      {
+        "tableName": "downloaded_chapters",
+        "createSql": "CREATE TABLE IF NOT EXISTS `${TABLE_NAME}` (`sourceId` TEXT NOT NULL, `chapterId` TEXT NOT NULL, `webtoonId` TEXT NOT NULL, `webtoonTitle` TEXT NOT NULL, `chapterTitle` TEXT NOT NULL, `sourceName` TEXT NOT NULL, `localDirectory` TEXT NOT NULL, `pageCount` INTEGER NOT NULL, `downloadedAt` INTEGER NOT NULL, `fileSizeBytes` INTEGER NOT NULL, PRIMARY KEY(`sourceId`, `chapterId`))",
+        "fields": [
+          {
+            "fieldPath": "sourceId",
+            "columnName": "sourceId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "chapterId",
+            "columnName": "chapterId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "webtoonId",
+            "columnName": "webtoonId",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "webtoonTitle",
+            "columnName": "webtoonTitle",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "chapterTitle",
+            "columnName": "chapterTitle",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "sourceName",
+            "columnName": "sourceName",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "localDirectory",
+            "columnName": "localDirectory",
+            "affinity": "TEXT",
+            "notNull": true
+          },
+          {
+            "fieldPath": "pageCount",
+            "columnName": "pageCount",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "downloadedAt",
+            "columnName": "downloadedAt",
+            "affinity": "INTEGER",
+            "notNull": true
+          },
+          {
+            "fieldPath": "fileSizeBytes",
+            "columnName": "fileSizeBytes",
+            "affinity": "INTEGER",
+            "notNull": true
+          }
+        ],
+        "primaryKey": {
+          "autoGenerate": false,
+          "columnNames": [
+            "sourceId",
+            "chapterId"
+          ]
+        }
+      }
+    ],
+    "setupQueries": [
+      "CREATE TABLE IF NOT EXISTS room_master_table (id INTEGER PRIMARY KEY,identity_hash TEXT)",
+      "INSERT OR REPLACE INTO room_master_table (id,identity_hash) VALUES(42, 'de6d61c2f96ff72300e0a5167c9ef771')"
+    ]
+  }
+}

@@ -1,10 +1,8 @@
 package com.radiant.webtoon.ui.components
 
 import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateContentSize
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.MutableTransitionState
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -26,15 +24,15 @@ import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
 
 object AppMotion {
-    fun <T> springSnappy() = spring<T>(
-        dampingRatio = Spring.DampingRatioMediumBouncy,
-        stiffness = Spring.StiffnessMedium,
-    )
+    /** Press and selection. Short so a tap is never waiting on the motion. */
+    const val PressMs = 160
 
-    fun <T> springGentle() = spring<T>(
-        dampingRatio = Spring.DampingRatioNoBouncy,
-        stiffness = Spring.StiffnessMediumLow,
-    )
+    /** Reader chrome only. Page images stay still. */
+    const val ChromeMs = 180
+
+    fun <T> press() = tween<T>(durationMillis = PressMs, easing = FastOutSlowInEasing)
+
+    fun <T> chrome() = tween<T>(durationMillis = ChromeMs, easing = FastOutSlowInEasing)
 }
 
 /** Material-themed ripple touch feedback for list rows. */
@@ -61,10 +59,12 @@ fun Modifier.listItemRippleCombinedClickable(
     )
 }
 
-/** Gentle height transitions when list row content changes. */
-fun Modifier.animatedListRow(): Modifier = composed {
-    animateContentSize(animationSpec = AppMotion.springGentle())
-}
+/**
+ * List rows used to animate their height on every recomposition, which relaid out
+ * long chapter and history lists while scrolling. Rows stay fixed; removal still
+ * animates through [AnimatedListRow].
+ */
+fun Modifier.animatedListRow(): Modifier = this
 
 /**
  * Fades and collapses a row when [visible] becomes false — use before removing
@@ -78,10 +78,10 @@ fun AnimatedListRow(
 ) {
     AnimatedVisibility(
         visible = visible,
-        modifier = modifier.animatedListRow(),
-        enter = fadeIn(AppMotion.springGentle()) + expandVertically(AppMotion.springGentle()),
-        exit = fadeOut(tween(260)) + shrinkVertically(
-            animationSpec = AppMotion.springGentle(),
+        modifier = modifier,
+        enter = fadeIn(AppMotion.press()) + expandVertically(AppMotion.press()),
+        exit = fadeOut(AppMotion.press()) + shrinkVertically(
+            animationSpec = AppMotion.press(),
             shrinkTowards = Alignment.Top,
         ),
     ) {
@@ -120,13 +120,13 @@ fun SpringAlertDialog(
         AnimatedVisibility(
             visibleState = transition,
             enter = scaleIn(
-                initialScale = 0.9f,
-                animationSpec = AppMotion.springSnappy(),
-            ) + fadeIn(animationSpec = AppMotion.springSnappy()),
+                initialScale = 0.96f,
+                animationSpec = AppMotion.press(),
+            ) + fadeIn(animationSpec = AppMotion.press()),
             exit = scaleOut(
-                targetScale = 0.94f,
-                animationSpec = tween(durationMillis = 160),
-            ) + fadeOut(animationSpec = tween(durationMillis = 140)),
+                targetScale = 0.96f,
+                animationSpec = AppMotion.press(),
+            ) + fadeOut(animationSpec = AppMotion.press()),
         ) {
             Surface(
                 modifier = modifier,

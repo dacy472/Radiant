@@ -1,104 +1,113 @@
 package com.radiant.webtoon.core.domain.usecase
 
-import androidx.room.withTransaction
-import com.radiant.webtoon.core.database.CategoryDao
-import com.radiant.webtoon.core.database.ChapterDao
-import com.radiant.webtoon.core.database.LibraryCategoryCrossRef
-import com.radiant.webtoon.core.database.MangaDao
 import com.radiant.webtoon.core.database.WebtoonDatabase
 import com.radiant.webtoon.core.domain.ChapterMigrationMatcher
+import com.radiant.webtoon.core.domain.ChapterProgressTransfer
 
-data class MigrateWebtoonResult(
-    val matchedChapterCount: Int,
-    val totalOldChapters: Int,
-    val totalNewChapters: Int,
+/** Composite identity of a library row: `Manga.url` + `Manga.source` (Room primary key). */
+data class MangaIdentifier(
+    val url: String,
+    val sourceId: String,
+)
+
+/** What to carry over from the old entry. Defaults mirror Mihon's migration dialog. */
+data class MigrationOptions(
+    val copyChapterProgress: Boolean = true,
+    val copyHistory: Boolean = true,
+    val copyCategories: Boolean = true,
+    val copyTracking: Boolean = true,
+    val copyDateAdded: Boolean = true,
+    /** Un-favorites the old entry and drops its category mappings (rows/chapters are kept). */
+    val removeOldFromLibrary: Boolean = true,
+)
+
+data class MigrationResult(
+    val matchedCount: Int,
+    val totalOld: Int,
+    val totalNew: Int,
+    val unmatchedOld: Int,
 )
 
 /**
- * Migrates reading progress, bookmarks, library favorite status, and category
- * assignments from one webtoon entry to another.
+ * Moves reading progress, bookmarks, history, categories, tracking and library membership from
+ * [oldId] to [newId] in one atomic transaction.
  *
- * Both webtoons must already exist in Room with chapters loaded. Manga primary key
- * is `(url, source)` where [oldWebtoonId]/[newWebtoonId] map to `Manga.url`.
+ * Both entries must already exist in Room and the new entry's chapters must already be loaded
+ * (see `WebtoonRepository.loadWebtoonForMigration`) — nothing here touches the network.
+ * Any exception thrown inside the transaction rolls every write back and is rethrown.
  */
-class MigrateWebtoonUseCase(
-    private val database: WebtoonDatabase,
-    private val chapterDao: ChapterDao,
-    private val mangaDao: MangaDao,
-    private val categoryDao: CategoryDao,
-) {
-    constructor(database: WebtoonDatabase) : this(
-        database = database,
-        chapterDao = database.chapterDao(),
-        mangaDao = database.mangaDao(),
-        categoryDao = database.categoryDao(),
-    )
+class MigrateWebtoonUseCase(private val store: MigrationStore) {
+
+    constructor(database: WebtoonDatabase) : this(RoomMigrationStore(database))
 
     suspend operator fun invoke(
-        oldWebtoonId: String,
-        oldSourceId: String,
-        newWebtoonId: String,
-        newSourceId: String,
-    ): MigrateWebtoonResult {
-        var result = MigrateWebtoonResult(0, 0, 0)
-        database.withTransaction {
-            val oldManga = mangaDao.getManga(oldWebtoonId, oldSourceId)
-                ?: error("Old webtoon not found: $oldWebtoonId ($oldSourceId)")
-            mangaDao.getManga(newWebtoonId, newSourceId)
-                ?: error("New webtoon not found: $newWebtoonId ($newSourceId)")
+        oldId: MangaIdentifier,
+        newId: MangaIdentifier,
+        options: MigrationOptions = MigrationOptions(),
+    ): MigrationResult {
+        require(oldId != newId) { "Cannot migrate a webtoon onto itself" }
 
-            val oldChapters = chapterDao.getChapters(oldWebtoonId)
-            val newChapters = chapterDao.getChapters(newWebtoonId)
+        return store.inTransaction {
+            val oldManga = store.getManga(oldId.url, oldId.sourceId)
+                ?: error("Old webtoon not found: ${oldId.url} (${oldId.sourceId})")
+            val newManga = store.getManga(newId.url, newId.sourceId)
+                ?: error("New webtoon not found: ${newId.url} (${newId.sourceId})")
+
+            val oldChapters = store.getChapters(oldId.url, oldId.sourceId)
+            val newChapters = store.getChapters(newId.url, newId.sourceId)
             val matches = ChapterMigrationMatcher.matchChapters(oldChapters, newChapters)
 
-            val chapterUpdates = matches.map { (oldChapter, newChapter) ->
-                newChapter.copy(
-                    read = oldChapter.read,
-                    bookmark = oldChapter.bookmark,
-                    last_page_read = oldChapter.last_page_read,
+            if (options.copyChapterProgress && matches.isNotEmpty()) {
+                store.updateChapters(matches.map { (old, new) -> ChapterProgressTransfer.apply(old, new) })
+            }
+
+            if (options.copyHistory && matches.isNotEmpty()) {
+                val oldHistory = store.getHistory(oldId.url, oldId.sourceId).associateBy { it.chapter_id }
+                val copied = matches.mapNotNull { (old, new) ->
+                    oldHistory[old.url]?.copy(
+                        chapter_id = new.url,
+                        webtoon_id = newId.url,
+                        source_id = newId.sourceId,
+                        chapter_title = new.name,
+                        webtoon_title = newManga.title,
+                        webtoon_thumbnail = newManga.thumbnail_url,
+                    )
+                }
+                if (copied.isNotEmpty()) store.insertHistory(copied)
+            }
+
+            if (options.copyCategories) {
+                // Replace (not merge) so the new entry ends up in exactly the old entry's categories.
+                store.replaceCategories(
+                    newId.url,
+                    newId.sourceId,
+                    store.getCategoryIds(oldId.url, oldId.sourceId).distinct(),
                 )
             }
-            if (chapterUpdates.isNotEmpty()) {
-                chapterDao.updateAll(chapterUpdates)
+
+            if (options.copyTracking) {
+                val tracks = store.getTracks(oldId.url, oldId.sourceId)
+                    .map { it.copy(mangaUrl = newId.url, mangaSource = newId.sourceId) }
+                if (tracks.isNotEmpty()) store.insertTracks(tracks)
             }
 
-            copyCategoryAssignments(
-                oldWebtoonId = oldWebtoonId,
-                oldSourceId = oldSourceId,
-                newWebtoonId = newWebtoonId,
-                newSourceId = newSourceId,
-            )
+            val dateAdded = when {
+                options.copyDateAdded && oldManga.date_added > 0L -> oldManga.date_added
+                newManga.date_added > 0L -> newManga.date_added
+                else -> System.currentTimeMillis()
+            }
+            store.setFavorite(newId.url, newId.sourceId, favorite = true, dateAdded = dateAdded)
 
-            val dateAdded = oldManga.date_added.takeIf { it > 0L } ?: System.currentTimeMillis()
-            mangaDao.updateFavorite(newWebtoonId, newSourceId, isFavorite = true, date = dateAdded)
-            mangaDao.updateFavorite(oldWebtoonId, oldSourceId, isFavorite = false, date = 0)
+            if (options.removeOldFromLibrary) {
+                store.setFavorite(oldId.url, oldId.sourceId, favorite = false, dateAdded = 0L)
+                store.replaceCategories(oldId.url, oldId.sourceId, emptyList())
+            }
 
-            result = MigrateWebtoonResult(
-                matchedChapterCount = matches.size,
-                totalOldChapters = oldChapters.size,
-                totalNewChapters = newChapters.size,
-            )
-        }
-        return result
-    }
-
-    private suspend fun copyCategoryAssignments(
-        oldWebtoonId: String,
-        oldSourceId: String,
-        newWebtoonId: String,
-        newSourceId: String,
-    ) {
-        val oldMappings = categoryDao.getMappingsForWebtoon(oldWebtoonId, oldSourceId)
-        if (oldMappings.isEmpty()) return
-
-        categoryDao.removeMappingsForWebtoon(newWebtoonId, newSourceId)
-        oldMappings.forEach { mapping ->
-            categoryDao.addMapping(
-                LibraryCategoryCrossRef(
-                    webtoonId = newWebtoonId,
-                    sourceId = newSourceId,
-                    categoryId = mapping.categoryId,
-                ),
+            MigrationResult(
+                matchedCount = matches.size,
+                totalOld = oldChapters.size,
+                totalNew = newChapters.size,
+                unmatchedOld = oldChapters.size - matches.size,
             )
         }
     }

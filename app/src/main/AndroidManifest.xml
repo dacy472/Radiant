@@ -46,6 +46,11 @@
             </intent-filter>
         </receiver>
 
+        <!-- PackageInstaller session results for in-place extension updates (explicit PendingIntent only) -->
+        <receiver
+            android:name=".core.receiver.PackageInstallResultReceiver"
+            android:exported="false" />
+
         <!-- FileProvider for sharing APK files with the system installer -->
         <provider
             android:name="androidx.core.content.FileProvider"
@@ -56,6 +61,12 @@
                 android:name="android.support.FILE_PROVIDER_PATHS"
                 android:resource="@xml/file_paths" />
         </provider>
+
+        <activity
+            android:name=".ui.reader.ReaderActivity"
+            android:exported="false"
+            android:theme="@style/Theme.AppCompat.NoActionBar"
+            android:configChanges="keyboardHidden|orientation|screenSize|screenLayout|smallestScreenSize|uiMode" />
 
         <activity
             android:name=".MainActivity"

@@ -121,6 +121,7 @@ fun WebtoonThumbnailCard(
     val pressed by interactionSource.collectIsPressedAsState()
     val scale by animateFloatAsState(
         targetValue = if (pressed) 0.96f else 1f,
+        animationSpec = AppMotion.press(),
         label = "libraryCardScale",
     )
     Column(

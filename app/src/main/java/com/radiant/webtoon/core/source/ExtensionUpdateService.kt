@@ -1,161 +1,103 @@
 package com.radiant.webtoon.core.source
 
-import android.util.Log
-import com.google.gson.Gson
-import com.google.gson.reflect.TypeToken
-import eu.kanade.tachiyomi.network.NetworkHelper
-import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.withContext
-import okhttp3.Request
-import java.io.IOException
+/**
+ * Pure helpers for extension update checks. Network access goes through
+ * [ExtensionLoader.fetchRepoIndex] (Keiyoushi `index.pb`); the legacy `index.min.json` files are
+ * now stubs that list no real sources and must never be fetched.
+ */
 
 /**
- * Fetches `index.min.json` from a repository, filters by [ExtensionAllowlist.isAutoUpdatable],
- * and detects extensions whose remote [RepoExtensionEntry.versionCode] is newer
- * than the locally installed build.
+ * Normalizes a user- or legacy-provided repo URL to the protobuf index Mihon reads:
+ * `…/index.min.json`, `…/index.json` and bare repo roots all become `…/index.pb`.
  */
-class ExtensionUpdateService(
-    private val networkHelper: NetworkHelper,
-    private val gson: Gson = Gson(),
-) {
-    private val tag = "ExtensionUpdateService"
-
-    /**
-     * Download and parse the repository's `index.min.json` array.
-     */
-    suspend fun fetchIndexMinJson(repoUrl: String): List<RepoExtensionEntry> = withContext(Dispatchers.IO) {
-        val indexUrl = normalizeIndexMinJsonUrl(repoUrl)
-        Log.d(tag, "Fetching extension index: $indexUrl")
-
-        val request = Request.Builder()
-            .url(indexUrl)
-            .header("Accept", "application/json")
-            .build()
-
-        networkHelper.client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw IOException("Failed to fetch index.min.json: HTTP ${response.code}")
-            }
-            val body = response.body?.string()?.trim().orEmpty()
-            if (body.isEmpty()) {
-                throw IOException("Empty index.min.json response")
-            }
-            parseIndexMinJson(body, repoBaseUrl(repoUrl))
-        }
-    }
-
-    /**
-     * Filter whitelisted extensions and keep only those with a newer remote [versionCode].
-     *
-     * @param installedVersionCodes package name → installed versionCode (from PackageManager scan)
-     */
-    fun computeAvailableUpdates(
-        remoteEntries: List<RepoExtensionEntry>,
-        installedVersionCodes: Map<String, Long>,
-    ): List<RepoExtensionEntry> = computeExtensionUpdates(remoteEntries, installedVersionCodes)
-
-    /**
-     * Full update check: fetch remote index, compare against installed versions.
-     */
-    suspend fun checkForUpdates(
-        repoUrl: String,
-        installedVersionCodes: Map<String, Long>,
-    ): List<RepoExtensionEntry> {
-        val remote = fetchIndexMinJson(repoUrl)
-        val updates = computeAvailableUpdates(remote, installedVersionCodes)
-        Log.d(tag, "Found ${updates.size} extension update(s) from ${remote.size} remote entries")
-        return updates
-    }
-
-    /**
-     * Detect whitelisted updates and apply each via [applier] (download, overwrite, reload).
-     * Returns entries that could not be applied — safe for silent background use.
-     */
-    suspend fun checkAndApplyUpdates(
-        repoUrl: String,
-        installedVersionCodes: Map<String, Long>,
-        applier: suspend (RepoExtensionEntry) -> Unit,
-    ): List<RepoExtensionEntry> {
-        val updates = try {
-            checkForUpdates(repoUrl, installedVersionCodes)
-        } catch (e: Exception) {
-            Log.w(tag, "Update check failed (ignored): ${e.message}")
-            return emptyList()
-        }
-
-        if (updates.isEmpty()) return emptyList()
-
-        val failed = mutableListOf<RepoExtensionEntry>()
-        for (entry in updates) {
-            try {
-                applier(entry)
-                Log.d(tag, "Silently applied update for ${entry.id} (v${entry.versionCode})")
-            } catch (e: Exception) {
-                Log.w(tag, "Silent update failed for ${entry.id}: ${e.message}")
-                failed.add(entry)
-            }
-        }
-        return failed
-    }
-
-    private fun parseIndexMinJson(body: String, repoUrl: String): List<RepoExtensionEntry> {
-        val trimmed = body.trimStart()
-        val extensions: List<RepoExtensionEntry> = when {
-            trimmed.startsWith("[") -> {
-                val listType = object : TypeToken<List<RepoExtensionEntry>>() {}.type
-                gson.fromJson(trimmed, listType)
-            }
-            trimmed.startsWith("{") -> {
-                val index = gson.fromJson(trimmed, RepoIndex::class.java)
-                index.extensions
-            }
-            else -> throw IOException("Unrecognized index.min.json format")
-        }
-        return extensions.map { it.withRepoUrl(repoUrl) }
-    }
-
-    companion object {
-        /** Resolve any repo URL variant to `index.min.json`. */
-        fun normalizeIndexMinJsonUrl(repoUrl: String): String {
-            val trimmed = repoUrl.trim().trimEnd('/')
-            if (trimmed.endsWith("index.min.json", ignoreCase = true)) return trimmed
-
-            val fileName = trimmed.substringAfterLast('/')
-            val base = if (fileName.contains('.')) {
-                trimmed.substringBeforeLast('/')
-            } else {
-                trimmed
-            }
-
-            return when {
-                fileName.equals("index.pb", ignoreCase = true) ||
-                    fileName.equals("index.json", ignoreCase = true) -> "$base/index.min.json"
-                fileName.endsWith(".json", ignoreCase = true) -> "$base/index.min.json"
-                else -> "$trimmed/index.min.json"
-            }
-        }
-
-        /** Repo root used for APK download URL construction. */
-        fun repoBaseUrl(repoUrl: String): String {
-            val indexUrl = normalizeIndexMinJsonUrl(repoUrl)
-            return indexUrl.substringBeforeLast('/')
-        }
+internal fun normalizeRepoIndexUrl(repoUrl: String): String {
+    val trimmed = repoUrl.trim().trimEnd('/')
+    if (trimmed.isEmpty()) return trimmed
+    val fileName = trimmed.substringAfterLast('/')
+    return when {
+        fileName.equals("index.pb", ignoreCase = true) -> trimmed
+        fileName.equals("index.min.json", ignoreCase = true) ||
+            fileName.equals("index.json", ignoreCase = true) -> "${trimmed.substringBeforeLast('/')}/index.pb"
+        else -> "$trimmed/index.pb"
     }
 }
 
-/** Pure update comparison — unit-testable without network/Android deps. */
+/**
+ * Pure update comparison — unit-testable without network/Android deps.
+ *
+ * Same rule as Mihon: an update is a higher versionCode **or** a newer extension-lib. Keiyoushi
+ * restarts versionCode when an extension moves to a new lib (Flame Comics went from 1.4.5x to
+ * 1.6.3), so comparing versionCode alone would pin users on the old, broken build forever.
+ */
 internal fun computeExtensionUpdates(
     remoteEntries: List<RepoExtensionEntry>,
     installedVersionCodes: Map<String, Long>,
+    installedLibVersions: Map<String, String?> = emptyMap(),
 ): List<RepoExtensionEntry> {
     return remoteEntries
         .asSequence()
         .filter { ExtensionAllowlist.isAutoUpdatable(it.id) }
         .mapNotNull { entry ->
             val installedCode = installedVersionCodes[entry.id] ?: return@mapNotNull null
-            if (entry.versionCode > installedCode) entry else null
+            val newerLib = isNewerExtensionLib(entry.extensionLibVersion, installedLibVersions[entry.id])
+            if (entry.versionCode > installedCode || newerLib) entry else null
         }
         .distinctBy { it.id }
         .sortedBy { it.name.lowercase() }
         .toList()
 }
+
+/** `true` when [remote] (e.g. "1.6") is a strictly newer major.minor than [installed] ("1.4"). */
+internal fun isNewerExtensionLib(remote: String?, installed: String?): Boolean {
+    fun parse(raw: String?): Pair<Int, Int>? {
+        val parts = raw?.trim()?.split('.', '-', '_') ?: return null
+        val major = parts.getOrNull(0)?.toIntOrNull() ?: return null
+        return major to (parts.getOrNull(1)?.toIntOrNull() ?: 0)
+    }
+    val r = parse(remote) ?: return false
+    val i = parse(installed) ?: return false
+    return r.first > i.first || (r.first == i.first && r.second > i.second)
+}
+
+/**
+ * Merge entries from several repositories: unique by package id, highest [RepoExtensionEntry.versionCode]
+ * wins (first repo wins ties). Result keeps first-seen order.
+ */
+internal fun mergeRepoEntriesKeepingHighest(entries: List<RepoExtensionEntry>): List<RepoExtensionEntry> {
+    val best = LinkedHashMap<String, RepoExtensionEntry>()
+    for (entry in entries) {
+        val current = best[entry.id]
+        if (current == null || entry.versionCode > current.versionCode) best[entry.id] = entry
+    }
+    return best.values.toList()
+}
+
+/**
+ * Fetch every repo with [fetch]; a failing repo is reported via [onError] and skipped so the
+ * remaining repos still contribute. Entries are merged with [mergeRepoEntriesKeepingHighest].
+ */
+internal suspend fun collectRepoEntries(
+    repoUrls: List<String>,
+    fetch: suspend (String) -> List<RepoExtensionEntry>,
+    onError: (String, Exception) -> Unit = { _, _ -> },
+): List<RepoExtensionEntry> {
+    val all = mutableListOf<RepoExtensionEntry>()
+    for (url in repoUrls.distinct()) {
+        try {
+            all.addAll(fetch(url))
+        } catch (e: kotlinx.coroutines.CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            onError(url, e)
+        }
+    }
+    return mergeRepoEntriesKeepingHighest(all)
+}
+
+/** Update status for the installed extension that [this] remote entry supersedes. */
+internal fun RepoExtensionEntry.toUpdateAvailable(): com.radiant.webtoon.core.model.Extension.Installed.UpdateAvailable =
+    com.radiant.webtoon.core.model.Extension.Installed.UpdateAvailable(
+        remoteVersionCode = versionCode,
+        remoteVersionName = version,
+        repoUrl = installableRepoUrl(),
+    )

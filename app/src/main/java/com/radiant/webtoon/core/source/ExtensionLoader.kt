@@ -86,23 +86,41 @@ class ExtensionLoader(private val context: Context) {
     // ─── Repo Index Fetching ───
 
     suspend fun fetchRepoIndex(repoUrl: String): RepoIndex = withContext(Dispatchers.IO) {
-        var url = repoUrl.trim()
+        val parentRepoUrl = repoUrl.trim()
+        var url = parentRepoUrl
         if (!url.endsWith(".json") && !url.endsWith(".pb")) {
             url = "${url.trimEnd('/')}/index.pb"
         }
 
+        fun publish(index: RepoIndex): RepoIndex {
+            val filtered = filterRepoIndex(index)
+            if (parentRepoUrl.isBlank()) return filtered
+            return filtered.copy(extensions = filtered.extensions.attachRepoUrl(parentRepoUrl))
+        }
+
         Log.d(tag, "Fetching repo index from: $url")
 
-        fun fetchBytes(targetUrl: String): ByteArray {
+        fun fetchBytesOnce(targetUrl: String): ByteArray {
             val request = Request.Builder()
                 .url(targetUrl)
                 .build()
             client.newCall(request).execute().use { response ->
                 if (!response.isSuccessful) {
-                    throw Exception("Failed to fetch repo index: HTTP ${response.code}")
+                    throw java.io.IOException("Failed to fetch repo index: HTTP ${response.code}")
                 }
-                return response.body?.bytes() ?: throw Exception("Empty response body")
+                val body = response.body.bytes()
+                if (body.isEmpty()) throw java.io.IOException("Empty repo index response")
+                return body
             }
+        }
+
+        // One retry: a dropped connection on cold start otherwise leaves the catalog empty.
+        fun fetchBytes(targetUrl: String): ByteArray = try {
+            fetchBytesOnce(targetUrl)
+        } catch (e: java.io.IOException) {
+            Log.w(tag, "Repo index fetch failed, retrying once: ${e.message}")
+            Thread.sleep(REPO_FETCH_RETRY_DELAY_MS)
+            fetchBytesOnce(targetUrl)
         }
 
         var bytes = fetchBytes(url)
@@ -119,7 +137,7 @@ class ExtensionLoader(private val context: Context) {
                     }
                 }
             }
-            return@withContext filterRepoIndex(parseLegacyJsonIndex(String(bytes), url))
+            return@withContext publish(parseLegacyJsonIndex(String(bytes), parentRepoUrl))
         }
 
         // Gzip-compressed protobuf (Keiyoushi index.pb)
@@ -141,9 +159,9 @@ class ExtensionLoader(private val context: Context) {
             val entries = list.extensions.flatMap { ext ->
                 NetworkExtensionStore(
                     extensionList = NetworkExtensionStore.ExtensionList(extensions = listOf(ext)),
-                ).toRepoEntries(url)
+                ).toRepoEntries(parentRepoUrl)
             }
-            return@withContext filterRepoIndex(
+            return@withContext publish(
                 RepoIndex(
                     name = store.name.ifBlank { "Repository" },
                     description = store.badgeLabel,
@@ -152,8 +170,8 @@ class ExtensionLoader(private val context: Context) {
             )
         }
 
-        val entries = store.toRepoEntries(url)
-        filterRepoIndex(
+        val entries = store.toRepoEntries(parentRepoUrl)
+        publish(
             RepoIndex(
                 name = store.name.ifBlank { "Repository" },
                 description = store.badgeLabel,
@@ -188,30 +206,51 @@ class ExtensionLoader(private val context: Context) {
      * Returns the local File path of the downloaded APK.
      */
     suspend fun downloadExtensionApk(
-        repoUrl: String,
+        repoUrl: String?,
         entry: RepoExtensionEntry
     ): File = withContext(Dispatchers.IO) {
-        val downloadUrl = buildExtensionApkUrl(repoUrl, entry.fileName, entry.apkUrl)
-        Log.d(tag, "Downloading extension APK: ${entry.name} from $downloadUrl")
+        // apkUrl first, then repoUrl-derived; throws "has no repository URL" when neither exists.
+        val candidates = ExtensionInstallRules.downloadUrls(entry, repoUrl)
+        val fileName = File(entry.fileName).name.takeIf { ExtensionApkPaths.isSafeFileName(it) }
+            ?: "${entry.id}.apk"
+        val localFile = ExtensionApkPaths.resolveChild(apkDownloadDir, fileName)
 
-        val request = Request.Builder().url(downloadUrl).build()
-        client.newCall(request).execute().use { response ->
-            if (!response.isSuccessful) {
-                throw Exception("Failed to download extension: HTTP ${response.code}")
-            }
-
-            val localFile = File(apkDownloadDir, entry.fileName)
-            response.body?.let { body ->
-                localFile.outputStream().use { out ->
-                    body.byteStream().use { input ->
-                        input.copyTo(out)
+        var lastError: Exception? = null
+        for (downloadUrl in candidates) {
+            // Partial downloads never carry the final name, so they can't be installed by mistake.
+            val partial = File(localFile.parentFile, "${localFile.name}.${System.nanoTime()}.part")
+            try {
+                Log.d(tag, "Downloading extension APK: ${entry.name}")
+                val request = Request.Builder().url(downloadUrl).build()
+                client.newCall(request).execute().use { response ->
+                    if (!response.isSuccessful) {
+                        throw Exception("Failed to download extension: HTTP ${response.code}")
+                    }
+                    val body = response.body ?: throw Exception("Empty response body")
+                    partial.outputStream().use { out ->
+                        body.byteStream().use { input -> input.copyTo(out) }
                     }
                 }
-            } ?: throw Exception("Empty response body")
-
-            Log.d(tag, "Extension APK saved to: ${localFile.absolutePath}")
-            localFile
+                if (partial.length() <= 0L) throw Exception("Downloaded extension APK is empty")
+                if (localFile.exists()) localFile.delete()
+                if (!partial.renameTo(localFile)) {
+                    partial.copyTo(localFile, overwrite = true)
+                }
+                Log.d(tag, "Extension APK saved to: ${localFile.absolutePath}")
+                return@withContext localFile
+            } catch (e: kotlinx.coroutines.CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                Log.w(tag, "Download attempt failed for ${entry.id}: ${e.message}")
+                lastError = e
+            } finally {
+                if (partial.exists()) partial.delete()
+            }
         }
+        throw ExtensionInstallException(
+            lastError?.message ?: "Failed to download extension ${entry.name}",
+            lastError,
+        )
     }
 
     /**
@@ -240,6 +279,7 @@ class ExtensionLoader(private val context: Context) {
     companion object {
         /** Canonical Tachiyomi / Keiyoushi extension package prefix. */
         const val TACHIYOMI_EXTENSION_PREFIX = "eu.kanade.tachiyomi.extension"
+        private const val REPO_FETCH_RETRY_DELAY_MS = 1_500L
     }
 
     /**
@@ -346,8 +386,7 @@ class ExtensionLoader(private val context: Context) {
             seenPackages.add(pkgName)
 
             try {
-                @Suppress("DEPRECATION")
-                val pkgInfo = pm.getPackageInfo(pkgName, PackageManager.GET_META_DATA)
+                val pkgInfo = pm.getPackageInfo(pkgName, ExtensionSignatureTrust.packageFlags())
                 val extInfo = parseExtensionPackage(pm, pkgInfo)
                 if (extInfo != null) {
                     extensions.add(extInfo)
@@ -405,8 +444,7 @@ class ExtensionLoader(private val context: Context) {
 
         for (file in files) {
             try {
-                @Suppress("DEPRECATION")
-                val pkgInfo = pm.getPackageArchiveInfo(file.absolutePath, PackageManager.GET_META_DATA)
+                val pkgInfo = pm.getPackageArchiveInfo(file.absolutePath, ExtensionSignatureTrust.packageFlags())
                 if (pkgInfo != null) {
                     val appInfo = pkgInfo.applicationInfo
                     if (appInfo != null) {
@@ -452,7 +490,7 @@ class ExtensionLoader(private val context: Context) {
      * Deletes a local extension APK and its associated data.
      */
     fun deleteLocalExtension(packageName: String): Boolean {
-        val file = File(extensionsDir, "$packageName.apk")
+        val file = ExtensionApkPaths.packageApkFile(extensionsDir, packageName)
         if (file.exists()) {
             // Read-only files cannot be deleted on some devices
             file.setWritable(true)
@@ -464,6 +502,106 @@ class ExtensionLoader(private val context: Context) {
             }
         }
         return false
+    }
+
+    fun isApkTrustedForExecution(extInfo: ExtensionInfo): Boolean {
+        val apk = File(extInfo.apkPath)
+        val pkgInfo = readSigningPackageInfo(extInfo) ?: return false
+        val signatures = signatureTrust.getSignatures(pkgInfo)
+        val decision = ExtensionInstallPolicy.decide(
+            expectedPackage = extInfo.packageName,
+            expectedVersionCode = null,
+            actualPackage = pkgInfo.packageName,
+            actualVersionCode = ExtensionSignatureTrust.packageVersionCode(pkgInfo),
+            signatures = signatures,
+            officialFingerprint = ExtensionSignatureTrust.OFFICIAL_KEIYOUSHI_FINGERPRINT,
+            userTrustedKeys = signatureTrust.trustedKeySet(),
+            apkBytes = apk.takeIf { it.exists() }?.length() ?: 1L,
+            allowUnsigned = com.radiant.webtoon.BuildConfig.DEBUG && isPrivateExtensionApk(apk),
+        )
+        return decision.canExecute
+    }
+
+    fun evaluateStagedApk(
+        staged: File,
+        expectedPackage: String,
+        expectedVersionCode: Long,
+    ): ExtensionInstallDecision {
+        if (!staged.exists() || staged.length() <= 0L) {
+            return ExtensionInstallDecision.Rejected("Malformed or truncated APK")
+        }
+        val pkgInfo = context.packageManager.getPackageArchiveInfo(
+            staged.absolutePath,
+            ExtensionSignatureTrust.packageFlags(),
+        ) ?: return ExtensionInstallDecision.Rejected("Malformed APK: PackageManager could not parse archive")
+        val signatures = signatureTrust.getSignatures(pkgInfo)
+        return ExtensionInstallPolicy.decide(
+            expectedPackage = expectedPackage,
+            expectedVersionCode = expectedVersionCode,
+            actualPackage = pkgInfo.packageName,
+            actualVersionCode = ExtensionSignatureTrust.packageVersionCode(pkgInfo),
+            signatures = signatures,
+            officialFingerprint = ExtensionSignatureTrust.OFFICIAL_KEIYOUSHI_FINGERPRINT,
+            userTrustedKeys = signatureTrust.trustedKeySet(),
+            apkBytes = staged.length(),
+            allowUnsigned = com.radiant.webtoon.BuildConfig.DEBUG && isPrivateExtensionApk(staged),
+        )
+    }
+
+    /** Private copies under filesDir/extensions. System APKs stay signature-checked. */
+    private fun isPrivateExtensionApk(apk: File): Boolean {
+        if (!apk.exists()) return false
+        return try {
+            val root = extensionsDir.canonicalFile
+            val candidate = apk.canonicalFile
+            val rootPath = root.path
+            val candidatePath = candidate.path
+            candidatePath == rootPath || candidatePath.startsWith(rootPath + File.separator)
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Replaces [dest] with [staged] while keeping the previous APK if the replace fails.
+     */
+    fun commitStagedApk(staged: File, dest: File) {
+        val backup = File(dest.parentFile, dest.name + ".bak")
+        if (dest.exists()) {
+            dest.setWritable(true)
+            if (backup.exists()) backup.delete()
+            if (!dest.renameTo(backup) && !dest.copyTo(backup, overwrite = true).exists()) {
+                throw Exception("Could not snapshot the working extension APK")
+            }
+        }
+        try {
+            if (dest.exists()) dest.delete()
+            if (!staged.renameTo(dest)) {
+                staged.copyTo(dest, overwrite = true)
+                staged.delete()
+            }
+            dest.setWritable(false)
+            if (backup.exists()) backup.delete()
+        } catch (e: Exception) {
+            if (backup.exists()) {
+                dest.delete()
+                backup.renameTo(dest)
+            }
+            throw e
+        }
+    }
+
+    private fun readSigningPackageInfo(extInfo: ExtensionInfo): PackageInfo? {
+        val flags = ExtensionSignatureTrust.packageFlags()
+        val apk = File(extInfo.apkPath)
+        if (apk.exists()) {
+            return context.packageManager.getPackageArchiveInfo(apk.absolutePath, flags)
+        }
+        return try {
+            context.packageManager.getPackageInfo(extInfo.packageName, flags)
+        } catch (_: Exception) {
+            null
+        }
     }
 
     /**
@@ -501,7 +639,14 @@ class ExtensionLoader(private val context: Context) {
         return deleted
     }
 
-    /** Drop cached ClassLoader and read-only APK copy so the next load uses a fresh file. */
+    /**
+     * Drop cached ClassLoader and read-only APK copy so the next load uses a fresh file.
+     *
+     * Limit: a [PathClassLoader] can never unload classes in the JVM. The old loader (and its
+     * classes) stays in memory until nothing references it, so callers must also drop every
+     * Source instance created from it and always build a NEW loader for the new APK; the old
+     * loader is never reused for the updated version.
+     */
     fun invalidateLoadedExtension(packageName: String) {
         classLoaders.remove(packageName)
         val dexDir = File(context.codeCacheDir, "ext_$packageName")
@@ -679,6 +824,9 @@ class ExtensionLoader(private val context: Context) {
      * Uses [PathClassLoader] (Mihon-style) against a read-only APK path.
      */
     fun loadExtensionSources(extInfo: ExtensionInfo): List<TachiyomiSource> {
+        if (!isApkTrustedForExecution(extInfo)) {
+            throw SecurityException("Refusing to execute untrusted extension ${extInfo.packageName}")
+        }
         if (extInfo.libCompatibility == ExtensionLibCompatibility.TooNew) {
             throw IllegalStateException(
                 "Extension ${extInfo.packageName} requires extension-lib ${extInfo.extensionLibVersion}; " +
@@ -877,3 +1025,6 @@ internal fun RepoExtensionEntry.withRepoUrl(repoUrl: String): RepoExtensionEntry
 
 internal fun List<RepoExtensionEntry>.attachRepoUrl(repoUrl: String): List<RepoExtensionEntry> =
     map { it.withRepoUrl(repoUrl) }
+
+/** Non-blank parent repository URL, or null when the entry cannot be installed from a repo. */
+internal fun RepoExtensionEntry.installableRepoUrl(): String? = repoUrl?.takeIf { it.isNotBlank() }

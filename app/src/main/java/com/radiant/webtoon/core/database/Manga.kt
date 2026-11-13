@@ -45,11 +45,28 @@ interface MangaDao {
     @Query("SELECT source AS sourceId, COUNT(*) AS count FROM mangas WHERE favorite = 1 GROUP BY source")
     fun getLibrarySourceCounts(): Flow<List<MigrationSourceCount>>
 
-    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    @Insert(onConflict = OnConflictStrategy.ABORT)
     suspend fun insert(manga: Manga): Long
+
+    @Insert(onConflict = OnConflictStrategy.REPLACE)
+    suspend fun insertReplacing(manga: Manga): Long
 
     @Update
     suspend fun update(manga: Manga)
+
+    @Transaction
+    suspend fun upsertFetchedMetadata(fetched: Manga) {
+        val existing = getManga(fetched.url, fetched.source)
+        if (existing == null) {
+            insert(
+                fetched.copy(
+                    date_added = fetched.date_added.takeIf { it > 0L } ?: System.currentTimeMillis(),
+                ),
+            )
+        } else {
+            update(MangaMetadataMerge.merge(existing, fetched))
+        }
+    }
 
     @Delete
     suspend fun delete(manga: Manga)
@@ -65,7 +82,4 @@ interface MangaDao {
 
     @Query("DELETE FROM mangas WHERE url = :url AND source = :source")
     suspend fun delete(url: String, source: String)
-
-    @Query("UPDATE mangas SET source = :newSourceId, url = :newUrl, thumbnail_url = :newThumbnail WHERE url = :oldUrl AND source = :oldSource")
-    suspend fun updateMangaMigrationData(oldUrl: String, oldSource: String, newSourceId: String, newUrl: String, newThumbnail: String)
 }

@@ -48,6 +48,8 @@ import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -77,7 +79,8 @@ fun WebtoonDetailScreen(
     webtoonId: String,
     onBackClick: () -> Unit,
     onChapterClick: (String, String) -> Unit,
-    onWebViewClick: (url: String) -> Unit = {}
+    onWebViewClick: (url: String) -> Unit = {},
+    onMigrateClick: (title: String) -> Unit = {},
 ) {
     val context = LocalContext.current
     // Inject from the unified WebtoonDatabase (has Manga + Chapter tables)
@@ -98,6 +101,7 @@ fun WebtoonDetailScreen(
     val error by viewModel.error.collectAsStateWithLifecycle()
     val selectedChapterIds by viewModel.selectedChapterIds.collectAsStateWithLifecycle()
     val isInSelectionMode by viewModel.isInSelectionMode.collectAsStateWithLifecycle()
+    val resumeTarget by viewModel.resumeTarget.collectAsStateWithLifecycle()
     var showMenu by remember { mutableStateOf(false) }
     var showTrackDialog by remember { mutableStateOf(false) }
     var pendingDeleteChapterId by remember { mutableStateOf<String?>(null) }
@@ -113,9 +117,15 @@ fun WebtoonDetailScreen(
         viewModel.loadWebtoon(sourceId, webtoonId)
     }
 
+    val snackbarHostState = remember { SnackbarHostState() }
     LaunchedEffect(Unit) {
         viewModel.refreshToastMessage.collect { message ->
-            Toast.makeText(context, message, Toast.LENGTH_SHORT).show()
+            val result = snackbarHostState.showSnackbar(
+                message = message,
+                actionLabel = "Retry",
+                duration = SnackbarDuration.Long,
+            )
+            if (result == SnackbarResult.ActionPerformed) viewModel.refreshFromNetwork()
         }
     }
 
@@ -130,6 +140,9 @@ fun WebtoonDetailScreen(
                 0f
             }
         }
+    }
+    val resumeFabExpanded by remember {
+        derivedStateOf { !listState.isScrollInProgress || listState.firstVisibleItemIndex == 0 }
     }
 
     if (pullToRefreshState.isRefreshing && !isInSelectionMode) {
@@ -147,6 +160,7 @@ fun WebtoonDetailScreen(
     }
 
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             AnimatedContent(
                 targetState = isInSelectionMode,
@@ -229,9 +243,11 @@ fun WebtoonDetailScreen(
                                     DropdownMenuItem(
                                         text = { Text("Migrate") },
                                         leadingIcon = { Icon(Icons.Default.SwapHoriz, contentDescription = null) },
+                                        enabled = webtoon != null &&
+                                            sourceId != com.radiant.webtoon.core.local.LocalSourceIds.LOCAL_SOURCE_ID,
                                         onClick = {
                                             showMenu = false
-                                            android.widget.Toast.makeText(context, "Migrate coming soon", android.widget.Toast.LENGTH_SHORT).show()
+                                            webtoon?.title?.let(onMigrateClick)
                                         }
                                     )
                                 }
@@ -241,7 +257,23 @@ fun WebtoonDetailScreen(
                     )
                 }
             }
-        }
+        },
+        floatingActionButton = {
+            val target = resumeTarget
+            AnimatedVisibility(
+                visible = target != null && !isInSelectionMode,
+                enter = fadeIn() + slideInVertically { it / 2 },
+                exit = fadeOut() + slideOutVertically { it / 2 },
+            ) {
+                if (target != null) {
+                    ResumeReadingButton(
+                        target = target,
+                        expanded = resumeFabExpanded,
+                        onClick = { onChapterClick(target.chapter.url, target.chapter.name) },
+                    )
+                }
+            }
+        },
     ) { paddingValues ->
         Box(
             modifier = Modifier
@@ -275,12 +307,20 @@ fun WebtoonDetailScreen(
                     error?.let { message ->
                         if (webtoon == null && chapters.isEmpty()) {
                             item {
-                                Text(
-                                    text = message,
-                                    color = MaterialTheme.colorScheme.error,
-                                    style = MaterialTheme.typography.bodyMedium,
+                                Column(
                                     modifier = Modifier.padding(horizontal = 16.dp, vertical = 8.dp),
-                                )
+                                ) {
+                                    Text(
+                                        text = message,
+                                        color = MaterialTheme.colorScheme.error,
+                                        style = MaterialTheme.typography.bodyMedium,
+                                    )
+                                    OutlinedButton(
+                                        onClick = { viewModel.refreshFromNetwork() },
+                                        enabled = !isRefreshing,
+                                        modifier = Modifier.padding(top = 8.dp),
+                                    ) { Text("Retry") }
+                                }
                             }
                         }
                     }
@@ -338,6 +378,8 @@ fun WebtoonDetailScreen(
                             }
                         )
                     }
+                    // Keeps the last chapter row clear of the Start / Resume button.
+                    item { Spacer(Modifier.height(88.dp)) }
                 }
             }
 
@@ -377,6 +419,47 @@ fun WebtoonDetailScreen(
             },
         )
     }
+}
+
+/** Mihon-style Start / Resume button; collapses to its icon while the chapter list scrolls. */
+@Composable
+private fun ResumeReadingButton(
+    target: com.radiant.webtoon.core.domain.ResumeTarget,
+    expanded: Boolean,
+    onClick: () -> Unit,
+) {
+    val label = when (target.kind) {
+        com.radiant.webtoon.core.domain.ResumeTarget.Kind.START -> "Start"
+        com.radiant.webtoon.core.domain.ResumeTarget.Kind.RESUME -> "Resume"
+        com.radiant.webtoon.core.domain.ResumeTarget.Kind.READ_AGAIN -> "Read again"
+    }
+    val chapterLabel = target.chapter.chapter_number
+        .takeIf { it >= 0f }
+        ?.let { n -> "Ch. " + if (n % 1f == 0f) n.toInt().toString() else n.toString() }
+        ?: target.chapter.name
+    ExtendedFloatingActionButton(
+        onClick = onClick,
+        expanded = expanded,
+        icon = {
+            Icon(
+                imageVector = if (target.kind == com.radiant.webtoon.core.domain.ResumeTarget.Kind.READ_AGAIN) {
+                    Icons.Default.Replay
+                } else {
+                    Icons.Default.PlayArrow
+                },
+                contentDescription = null,
+            )
+        },
+        text = {
+            Text(
+                text = "$label · $chapterLabel",
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.widthIn(max = 220.dp),
+            )
+        },
+        modifier = Modifier.semantics { contentDescription = "$label $chapterLabel" },
+    )
 }
 
 @Composable

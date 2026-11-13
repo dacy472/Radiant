@@ -1,3 +1,4 @@
+import { assertTrustedArtifact } from '../runtime/artifactTrust.js';
 import { BundleRuntime } from '../runtime/BundleRuntime.js';
 import { ExtensionBundleError } from '../runtime/errors.js';
 import { isScrapingSourceMethod } from '../runtime/scrapingMethods.js';
@@ -135,7 +136,15 @@ export class ExtensionRepository {
         }
         this.store.setInstalling(extensionId);
         try {
-            const { bundle, source } = await this.runtime.loadSourceFromUrl(catalogEntry.bundleUrl, extensionId, extensionId);
+            const bundle = await this.runtime.downloadBundle(catalogEntry.bundleUrl);
+            assertTrustedArtifact({
+                extensionId,
+                actualSha256: bundle.sha256,
+                code: bundle.code,
+                ...(catalogEntry.publisher !== undefined ? { publisher: catalogEntry.publisher } : {}),
+                ...(catalogEntry.sha256 !== undefined ? { expectedSha256: catalogEntry.sha256 } : {}),
+            });
+            const source = await this.runtime.instantiateSource(bundle, extensionId, extensionId);
             const record = {
                 id: catalogEntry.id,
                 name: catalogEntry.name,

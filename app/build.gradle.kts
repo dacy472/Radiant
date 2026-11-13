@@ -6,6 +6,10 @@ plugins {
     id("org.jetbrains.kotlin.plugin.serialization")
 }
 
+ksp {
+    arg("room.schemaLocation", "$projectDir/schemas")
+}
+
 android {
     namespace = "com.radiant.webtoon"
     compileSdk = 36
@@ -14,8 +18,8 @@ android {
         applicationId = "com.radiant.webtoon"
         minSdk = 26
         targetSdk = 36
-        versionCode = 2
-        versionName = "0.1.1"
+        versionCode = 3
+        versionName = "0.1.2"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -114,6 +118,14 @@ dependencies {
     // Coil (Image Loading)
     implementation("io.coil-kt:coil-compose:2.6.0")
 
+    // Native View-based reader (Mihon-style viewers): RecyclerView webtoon strip, ViewPager2 pagers,
+    // and SubsamplingScaleImageView for tiled big-image rendering. The upstream (pure Java,
+    // pluggable-decoder) SSIV is used instead of Mihon's native-decoder fork so Crop Borders can run
+    // in our own ImageRegionDecoder and no extra native libs are shipped (16 KB alignment safe).
+    implementation("androidx.recyclerview:recyclerview:1.3.2")
+    implementation("androidx.viewpager2:viewpager2:1.1.0")
+    implementation("com.davemorrissey.labs:subsampling-scale-image-view-androidx:3.10.0")
+
     // Coroutines — aligned with Mihon extension host (1.11.0)
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-core:1.11.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.11.0")
@@ -134,6 +146,8 @@ dependencies {
     implementation("androidx.fragment:fragment-ktx:1.6.2")
 
     testImplementation("junit:junit:4.13.2")
+    testImplementation("org.xerial:sqlite-jdbc:3.45.3.0")
+    testImplementation("org.jetbrains.kotlinx:kotlinx-coroutines-test:1.11.0")
     androidTestImplementation("androidx.test.ext:junit:1.1.5")
     androidTestImplementation("androidx.test.espresso:espresso-core:3.5.1")
     androidTestImplementation(platform("androidx.compose:compose-bom:2024.02.01"))

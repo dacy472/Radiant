@@ -43,17 +43,17 @@ class ExtensionSignatureTrust(context: Context) {
     }
 
     fun isTrusted(pkgInfo: PackageInfo, signatures: List<String>): Boolean {
+        // Empty signatures stay untrusted here. Unsigned local APKs are a debug-only
+        // install policy decision, not a release trust bypass.
         if (signatures.isEmpty()) return false
-        if (signatures.any { it.equals(OFFICIAL_KEIYOUSHI_FINGERPRINT, ignoreCase = true) }) {
-            return true
-        }
+        if (signatures.any { isOfficialFingerprint(it) }) return true
         val versionCode = packageVersionCode(pkgInfo)
         val key = trustKey(pkgInfo.packageName, versionCode, signatures.last())
         return key in trustedKeys()
     }
 
     fun isSignatureOfficial(signatures: List<String>): Boolean =
-        signatures.any { it.equals(OFFICIAL_KEIYOUSHI_FINGERPRINT, ignoreCase = true) }
+        signatures.any { isOfficialFingerprint(it) }
 
     fun trust(packageName: String, versionCode: Long, signatureHash: String) {
         val next = trustedKeys()
@@ -63,6 +63,8 @@ class ExtensionSignatureTrust(context: Context) {
         prefs.edit().putStringSet(KEY_TRUSTED, next).apply()
         Log.i(tag, "Trusted signature for $packageName (v$versionCode)")
     }
+
+    fun trustedKeySet(): Set<String> = trustedKeys()
 
     fun revokeAll() {
         prefs.edit().remove(KEY_TRUSTED).apply()
@@ -76,11 +78,27 @@ class ExtensionSignatureTrust(context: Context) {
         private const val KEY_TRUSTED = "trusted_extensions"
 
         /**
-         * Official Keiyoushi / Mihon extension-repo signing key fingerprint
-         * (`signingKeyFingerprint` from repo meta).
+         * SHA-256 of the Keiyoushi release APK signing certificate.
+         * Kept as the original constant; do not replace it with the index key.
          */
         const val OFFICIAL_KEIYOUSHI_FINGERPRINT =
             "7ce04da7773d41b489f4693a366c36bcd0a11fc39b547168553c285bd7348e23"
+
+        /**
+         * `signingKeyFingerprint` published in the Keiyoushi index.
+         * Distinct from [OFFICIAL_KEIYOUSHI_FINGERPRINT]; both are official.
+         */
+        const val OFFICIAL_KEIYOUSHI_INDEX_FINGERPRINT =
+            "9add655a78e96c4ec7a53ef89dccb557cb5d767489fac5e785d671a5a75d4da2"
+
+        /** Release cert and index signing key. One entry when the values match. */
+        val OFFICIAL_FINGERPRINTS: Set<String> = setOf(
+            OFFICIAL_KEIYOUSHI_FINGERPRINT,
+            OFFICIAL_KEIYOUSHI_INDEX_FINGERPRINT,
+        )
+
+        fun isOfficialFingerprint(signatureHash: String): Boolean =
+            OFFICIAL_FINGERPRINTS.any { it.equals(signatureHash, ignoreCase = true) }
 
         fun trustKey(packageName: String, versionCode: Long, signatureHash: String): String =
             "$packageName:$versionCode:$signatureHash"

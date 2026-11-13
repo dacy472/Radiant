@@ -5,7 +5,9 @@ export type ExtensionBundleErrorCode =
   | 'sandbox'
   | 'contract'
   | 'not_found'
-  | 'already_installed';
+  | 'already_installed'
+  | 'untrusted'
+  | 'integrity';
 
 /**
  * Raised when a remote bundle cannot be downloaded, parsed, sandboxed, or validated.

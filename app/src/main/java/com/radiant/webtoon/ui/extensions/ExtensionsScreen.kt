@@ -5,6 +5,7 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Settings
@@ -182,7 +183,7 @@ fun ExtensionsScreen(
     val installed by viewModel.installed.collectAsStateWithLifecycle()
     val available by viewModel.available.collectAsStateWithLifecycle()
     val isRefreshing by viewModel.isRefreshing.collectAsStateWithLifecycle()
-    val isUpdatingAll by viewModel.isUpdatingAll.collectAsStateWithLifecycle()
+    val isUpdatingAll by extensionManager.isUpdatingAllExtensions.collectAsStateWithLifecycle()
     val availableUpdates by extensionManager.availableUpdates.collectAsStateWithLifecycle()
     val error by viewModel.error.collectAsStateWithLifecycle()
     val installIntent by viewModel.installIntent.collectAsStateWithLifecycle()
@@ -349,6 +350,25 @@ private fun UpdateAllBanner(
     }
 }
 
+/** Small "UPDATE" label; tertiary container colors read in both light and dark themes. */
+@Composable
+private fun UpdateBadge(modifier: Modifier = Modifier) {
+    Surface(
+        modifier = modifier,
+        shape = RoundedCornerShape(6.dp),
+        color = MaterialTheme.colorScheme.tertiaryContainer,
+        contentColor = MaterialTheme.colorScheme.onTertiaryContainer,
+    ) {
+        Text(
+            text = "UPDATE",
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp),
+            style = MaterialTheme.typography.labelSmall,
+            fontWeight = FontWeight.Bold,
+            maxLines = 1,
+        )
+    }
+}
+
 @Composable
 private fun VerifiedSourcesHeader() {
     Column(
@@ -410,15 +430,25 @@ private fun InstalledChannelRow(
         ExtensionIcon(extension = extension)
         Spacer(modifier = Modifier.width(12.dp))
         Column(modifier = Modifier.weight(1f)) {
-            Text(
-                extension.name,
-                style = MaterialTheme.typography.bodyLarge,
-                maxLines = 1,
-                overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
-            )
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    extension.name,
+                    style = MaterialTheme.typography.bodyLarge,
+                    maxLines = 1,
+                    overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f, fill = false),
+                )
+                if (installedExt?.hasUpdate == true) {
+                    Spacer(modifier = Modifier.width(8.dp))
+                    UpdateBadge()
+                }
+            }
             Text(
                 buildString {
                     append(extension.version ?: "")
+                    installedExt?.updateAvailable?.remoteVersionName
+                        ?.takeIf { it.isNotBlank() }
+                        ?.let { append(" → $it") }
                     append(" · ")
                     append(trustLabel)
                     if (installedExt?.libCompatibility == ExtensionLibCompatibility.TooNew) {
@@ -438,7 +468,7 @@ private fun InstalledChannelRow(
                 onClick = onUpdate,
                 colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.tertiary),
             ) {
-                Text("UPDATE")
+                Text("Update")
             }
         } else if (installedExt?.isTrusted == true) {
             val sourceId = extensionManager.findSourceIdForPackage(extension.id)

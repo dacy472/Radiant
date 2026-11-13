@@ -190,6 +190,9 @@ class DownloadManager(
     }
 
     private suspend fun processQueueLoop() {
+        downloadRepository.recoverOrphanedDownloading { task ->
+            downloadQueue.getJob(task)?.isActive == true
+        }
         while (true) {
             if (settingsManager.downloadOnlyOnWifi.firstOrNull() == true && !isOnWifi()) {
                 Log.d(TAG, "WiFi-only enabled; waiting for unmetered connection")
@@ -197,8 +200,10 @@ class DownloadManager(
                 continue
             }
 
-            val downloadingCount = downloadRepository.countDownloading()
-            val slots = MAX_CONCURRENT_DOWNLOADS - downloadingCount
+            val slots = DownloadQueuePolicy.availableSlots(
+                runningJobs = downloadQueue.activeCount(),
+                maxConcurrent = MAX_CONCURRENT_DOWNLOADS,
+            )
             if (slots > 0) {
                 repeat(slots) {
                     val claimed = downloadRepository.claimNextPending() ?: return@repeat
@@ -208,7 +213,10 @@ class DownloadManager(
 
             refreshQueueState()
 
-            val stillWorking = downloadRepository.hasActiveWork() || downloadQueue.activeCount() > 0
+            val stillWorking = DownloadQueuePolicy.shouldKeepPolling(
+                hasPendingOrDownloading = downloadRepository.hasActiveWork(),
+                runningJobs = downloadQueue.activeCount(),
+            )
             if (!stillWorking) {
                 _downloadSpeed.value = "0 KB/s"
                 stopService()
@@ -219,6 +227,7 @@ class DownloadManager(
     }
 
     private fun launchChapterDownload(task: DownloadTask) {
+        if (downloadQueue.getJob(task)?.isActive == true) return
         val key = downloadQueue.taskKey(task)
         setCancelled(task, false)
         val job = scope.launch {

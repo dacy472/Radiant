@@ -1,5 +1,6 @@
 package com.radiant.webtoon.ui.settings
 
+import android.widget.Toast
 import androidx.compose.foundation.layout.*
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ArrowBack
@@ -9,6 +10,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import com.radiant.webtoon.WebtoonApplication
+import com.radiant.webtoon.core.lock.AppLockAuthenticator
 import kotlinx.coroutines.launch
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -39,7 +41,19 @@ fun SecuritySettingsScreen(onBackClick: () -> Unit) {
                 title = "App Lock",
                 summary = "Require fingerprint/face unlock to open app",
                 checked = requireBiometrics,
-                onCheckedChange = { scope.launch { settingsManager.setRequireBiometrics(it) } }
+                onCheckedChange = { enabled ->
+                    scope.launch {
+                        if (enabled && !AppLockAuthenticator.canEnable(context)) {
+                            Toast.makeText(
+                                context,
+                                "Enroll a fingerprint, face unlock, or device PIN before enabling App Lock",
+                                Toast.LENGTH_LONG,
+                            ).show()
+                            return@launch
+                        }
+                        settingsManager.setRequireBiometrics(enabled)
+                    }
+                }
             )
 
             HorizontalDivider(modifier = Modifier.padding(vertical = 16.dp))

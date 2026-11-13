@@ -13,6 +13,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Public
 import androidx.compose.material.icons.filled.PushPin
 import androidx.compose.material.icons.filled.Refresh
@@ -54,11 +55,15 @@ fun BrowseScreen(
     val coroutineScope = rememberCoroutineScope()
     val tabs = listOf("Sources", "Channels", "Migrate")
     val availableUpdates by extensionManager.availableUpdates.collectAsStateWithLifecycle()
+    val isUpdatingAllExtensions by extensionManager.isUpdatingAllExtensions.collectAsStateWithLifecycle()
 
     var isSearching by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
 
+    val snackbarHostState = remember { SnackbarHostState() }
+
     Scaffold(
+        snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             Column {
                 TopAppBar(
@@ -101,6 +106,32 @@ fun BrowseScreen(
                                     }
                                 }
                                 1 -> {
+                                    if (availableUpdates.isNotEmpty()) {
+                                        TextButton(
+                                            enabled = !isUpdatingAllExtensions,
+                                            onClick = {
+                                                coroutineScope.launch {
+                                                    val message = try {
+                                                        val result = extensionManager.updateAllAvailable()
+                                                        when {
+                                                            result.failed > 0 && result.succeeded == 0 ->
+                                                                "Update failed: ${result.failures.firstOrNull()?.second ?: "unknown error"}"
+                                                            result.failed > 0 ->
+                                                                "Updated ${result.succeeded}; ${result.failed} failed"
+                                                            else -> null
+                                                        }
+                                                    } catch (e: kotlinx.coroutines.CancellationException) {
+                                                        throw e
+                                                    } catch (e: Exception) {
+                                                        "Update failed: ${e.message}"
+                                                    }
+                                                    message?.let { snackbarHostState.showSnackbar(it) }
+                                                }
+                                            },
+                                        ) {
+                                            Text(if (isUpdatingAllExtensions) "Updating…" else "Update All")
+                                        }
+                                    }
                                     IconButton(onClick = {
                                         coroutineScope.launch {
                                             extensionManager.refreshAvailable()
@@ -366,12 +397,12 @@ fun MigrateTab(viewModel: BrowseViewModel, onMigrateSourceClick: (String) -> Uni
             )
         }
         itemsIndexed(
-            items.distinctBy { it.source.id },
-            key = { index, item -> "${item.source.id}_$index" }
+            items.distinctBy { it.sourceId },
+            key = { index, item -> "${item.sourceId}_$index" }
         ) { _, item ->
             MigrateSourceItem(
                 item = item,
-                onClick = { onMigrateSourceClick(item.source.id) }
+                onClick = { onMigrateSourceClick(item.sourceId) }
             )
         }
     }
@@ -402,26 +433,34 @@ fun MigrateSourceItem(
                 ),
             contentAlignment = Alignment.Center
         ) {
-            SourceIcon(
-                icon = item.source.icon,
-                contentDescription = "${item.source.name} icon",
-                size = 48.dp
-            )
+            if (item.source != null) {
+                SourceIcon(
+                    icon = item.source.icon,
+                    contentDescription = "${item.source.name} icon",
+                    size = 48.dp
+                )
+            } else {
+                Icon(
+                    imageVector = Icons.Default.Extension,
+                    contentDescription = "Source not installed",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+            }
         }
 
         Spacer(modifier = Modifier.width(16.dp))
 
-        // Source name + language
+        // Source name + language (or "not installed" for sources whose extension was removed)
         Column(modifier = Modifier.weight(1f)) {
             Text(
-                text = item.source.name,
+                text = item.source?.name ?: "Unavailable source",
                 style = MaterialTheme.typography.titleMedium,
                 fontWeight = FontWeight.Medium,
                 maxLines = 1
             )
             Spacer(modifier = Modifier.height(2.dp))
             Text(
-                text = item.source.lang.uppercase(),
+                text = item.source?.lang?.uppercase() ?: "Extension not installed",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

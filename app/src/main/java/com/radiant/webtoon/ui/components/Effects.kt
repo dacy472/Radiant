@@ -13,7 +13,11 @@ import androidx.compose.ui.input.pointer.pointerInput
 
 fun Modifier.bounceClick(onClick: () -> Unit = {}): Modifier = composed {
     var isPressed by remember { mutableStateOf(false) }
-    val scale by animateFloatAsState(if (isPressed) 0.95f else 1f, label = "bounceScale")
+    val scale by animateFloatAsState(
+        targetValue = if (isPressed) 0.96f else 1f,
+        animationSpec = AppMotion.press(),
+        label = "pressScale",
+    )
 
     this
         .graphicsLayer {

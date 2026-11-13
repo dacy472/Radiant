@@ -4,6 +4,8 @@ import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertTrue
+import org.junit.Assert.fail
 import org.junit.Test
 
 class ExtensionRepoUrlTest {
@@ -65,6 +67,33 @@ class ExtensionRepoUrlTest {
 
         assertEquals("https://example.com/custom-repo", attached[0].repoUrl)
         assertEquals("https://example.com/custom-repo", attached[1].repoUrl)
+        assertEquals("https://example.com/custom-repo", attached[0].installableRepoUrl())
+        assertEquals(null, RepoExtensionEntry(id = "c", name = "C", fileName = "c.apk").installableRepoUrl())
+    }
+
+    @Test
+    fun downloadUrls_usesEntryRepoWhenCallerOmitsIt() {
+        val entry = RepoExtensionEntry(
+            id = "eu.kanade.tachiyomi.extension.en.mangadex",
+            name = "MangaDex",
+            fileName = "tachiyomi-en.mangadex-v1.apk",
+            repoUrl = "https://example.com/custom-repo",
+        )
+        assertEquals(
+            listOf("https://example.com/custom-repo/apk/tachiyomi-en.mangadex-v1.apk"),
+            ExtensionInstallRules.downloadUrls(entry, null),
+        )
+    }
+
+    @Test
+    fun downloadUrls_reportsMissingRepositoryUrl() {
+        val entry = RepoExtensionEntry(id = "a", name = "A", fileName = "a.apk")
+        try {
+            ExtensionInstallRules.downloadUrls(entry, null)
+            fail("expected missing repository URL")
+        } catch (e: ExtensionInstallException) {
+            assertTrue(e.message!!.contains("has no repository URL"))
+        }
     }
 
     @Test

@@ -26,6 +26,7 @@ import kotlinx.coroutines.sync.withLock
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.AtomicBoolean
+import java.io.File
 
 /**
  * Mihon-style manager for the full extension lifecycle:
@@ -45,6 +46,7 @@ class ExtensionManager(
 ) {
     private val tag = "ExtensionManager"
     private val signatureTrust = ExtensionSignatureTrust(context)
+    private val extensionInstaller by lazy { ExtensionInstaller(context, extensionLoader) }
 
     // Active sources loaded in memory (Mihon: installed extension sources)
     private val _installedExtensions = MutableStateFlow<List<Source>>(emptyList())
@@ -59,6 +61,10 @@ class ExtensionManager(
     /** Whitelisted extensions with a newer remote versionCode than the installed build. */
     private val _availableUpdates = MutableStateFlow<List<RepoExtensionEntry>>(emptyList())
     val availableUpdates: StateFlow<List<RepoExtensionEntry>> = _availableUpdates
+
+    /** True while [updateAllAvailable] is applying pending updates (shared by all UI entry points). */
+    private val _isUpdatingAllExtensions = MutableStateFlow(false)
+    val isUpdatingAllExtensions: StateFlow<Boolean> = _isUpdatingAllExtensions
 
     // Installed extension infos (from PackageManager scan)
     private val _installedExtensionInfos = MutableStateFlow<List<ExtensionInfo>>(emptyList())
@@ -96,7 +102,17 @@ class ExtensionManager(
             "https://github.com/keiyoushi/extensions/raw/repo/index.pb"
 
         /** Bump when cache format or repo URL changes — clears stale JSON stub caches. */
-        const val EXTENSION_CACHE_VERSION = 4
+        const val EXTENSION_CACHE_VERSION = 5
+
+        /**
+         * Bump to make every install pull the newest build of each installed extension from the
+         * live repo once, even with auto-update off (library and progress are untouched).
+         */
+        const val LIBRARY_REFRESH_VERSION = 1
+        private const val LIBRARY_REFRESH_PREF = "library_refresh_version"
+
+        /** A catalog fetched live within this window is reused instead of refetching. */
+        private const val LIVE_CATALOG_MAX_AGE_MS = 15 * 60 * 1000L
 
         private val LEGACY_REPO_URLS = setOf(
             "https://cdn.jsdelivr.net/gh/keiyoushi/extensions@repo/index.min.json",
@@ -107,9 +123,27 @@ class ExtensionManager(
         private val ENABLED_EXTENSION_LANGS = setOf("en", "all")
 
         const val FLAMECOMICS_PACKAGE = "eu.kanade.tachiyomi.extension.en.flamecomics"
-        const val FLAMECOMICS_MIN_VERSION_CODE = 50L
+        const val FLAMECOMICS_MIN_EXTENSION_LIB = "1.6"
         private const val FLAMECOMICS_REPAIR_PREF = "flamecomics_v51_repair_done"
     }
+
+    /** Wall-clock time [_availableExtensions] was last replaced by a live repo fetch. */
+    @Volatile
+    private var liveCatalogAt = 0L
+
+    private fun publishLiveCatalog(entries: List<RepoExtensionEntry>) {
+        _availableExtensions.value = entries
+        liveCatalogAt = System.currentTimeMillis()
+    }
+
+    private fun computeUpdatesFor(
+        remote: List<RepoExtensionEntry>,
+        installed: List<ExtensionInfo>,
+    ): List<RepoExtensionEntry> = computeExtensionUpdates(
+        remoteEntries = remote,
+        installedVersionCodes = installed.associate { it.packageName to it.versionCode },
+        installedLibVersions = installed.associate { it.packageName to it.extensionLibVersion },
+    )
 
     private fun isAdvancedMode(): Boolean = _advancedMode.value
 
@@ -211,13 +245,21 @@ class ExtensionManager(
 
     suspend fun addRepo(url: String) = withContext(Dispatchers.IO) {
         try {
-            val index = extensionLoader.fetchRepoIndex(url)
+            // Prefer the protobuf index (Mihon format); fall back to the URL as typed for
+            // third-party repos that still publish a real JSON index.
+            val pbUrl = normalizeRepoIndexUrl(url)
+            val (resolvedUrl, index) = try {
+                pbUrl to extensionLoader.fetchRepoIndex(pbUrl)
+            } catch (e: Exception) {
+                if (pbUrl == url.trim()) throw e
+                url.trim() to extensionLoader.fetchRepoIndex(url.trim())
+            }
             repoDao.insert(ExtensionRepoEntity(
-                baseUrl = url,
+                baseUrl = resolvedUrl,
                 name = index.name,
                 shortName = index.description
             ))
-            Log.d(tag, "Added repo: ${index.name} ($url)")
+            Log.d(tag, "Added repo: ${index.name} ($resolvedUrl)")
             refreshAvailable()
         } catch (e: Exception) {
             Log.e(tag, "Failed to add repo: $url", e)
@@ -255,7 +297,7 @@ class ExtensionManager(
                     .filter { isExtensionLanguageEnabled(it.lang) }
                     .distinctBy { it.id }
 
-                _availableExtensions.value = languageFiltered
+                if (languageFiltered.isNotEmpty()) publishLiveCatalog(languageFiltered)
 
                 val prefs = context.getSharedPreferences("extension_cache", Context.MODE_PRIVATE)
                 try {
@@ -268,15 +310,13 @@ class ExtensionManager(
                     Log.w(tag, "Failed to cache findAvailableExtensions result", e)
                 }
 
-                val installedCodes = _installedExtensionInfos.value
-                    .associate { it.packageName to it.versionCode }
-                    .ifEmpty {
-                        mergeInstalledExtensionInfos(
-                            extensionLoader.scanLocalExtensions(),
-                            extensionLoader.scanInstalledExtensions(),
-                        ).associate { it.packageName to it.versionCode }
-                    }
-                _availableUpdates.value = computeExtensionUpdates(languageFiltered, installedCodes)
+                val installed = _installedExtensionInfos.value.ifEmpty {
+                    mergeInstalledExtensionInfos(
+                        extensionLoader.scanLocalExtensions(),
+                        extensionLoader.scanInstalledExtensions(),
+                    )
+                }
+                _availableUpdates.value = computeUpdatesFor(languageFiltered, installed)
 
                 Log.i(
                     tag,
@@ -296,9 +336,8 @@ class ExtensionManager(
      */
     suspend fun refreshAvailableUpdates(repoUrl: String? = null) = withContext(Dispatchers.IO) {
         try {
-            val installedCodes = _installedExtensionInfos.value.associate { it.packageName to it.versionCode }
             val remote = resolveRemoteExtensionEntries(repoUrl)
-            val updates = computeExtensionUpdates(remote, installedCodes)
+            val updates = computeUpdatesFor(remote, _installedExtensionInfos.value)
             _availableUpdates.value = updates
             Log.d(tag, "Available updates: ${_availableUpdates.value.size}")
         } catch (e: Exception) {
@@ -312,13 +351,42 @@ class ExtensionManager(
      */
     suspend fun runBackgroundExtensionUpdateCheck(repoUrl: String? = null) = withContext(Dispatchers.IO) {
         prepareForUpdateCheck()
+        refreshRemoteCatalogFromRepos(repoUrl)
+        val prefs = context.getSharedPreferences("extension_cache", Context.MODE_PRIVATE)
+        val libraryRefreshDue = prefs.getInt(LIBRARY_REFRESH_PREF, 0) < LIBRARY_REFRESH_VERSION
         val autoUpdate = settingsManager.autoUpdateExtensions.first()
-        if (autoUpdate) {
+        if (libraryRefreshDue) {
+            refreshExtensionLibrary(repoUrl)
+        } else if (autoUpdate) {
             checkAndApplyUpdatesSilently(repoUrl)
         } else {
             refreshAvailableUpdates(repoUrl)
         }
         repairKnownBrokenExtensions()
+    }
+
+    /**
+     * One-time pass (see [LIBRARY_REFRESH_VERSION]): update every installed extension to the newest
+     * build in the live repo and re-arm the Flame Comics repair. Marked done only when the live
+     * catalog was reachable and nothing failed, so a flaky first launch retries next time.
+     */
+    private suspend fun refreshExtensionLibrary(repoUrl: String?) {
+        val prefs = context.getSharedPreferences("extension_cache", Context.MODE_PRIVATE)
+        Log.i(tag, "Refreshing installed extensions from the live repo (v$LIBRARY_REFRESH_VERSION)")
+        prefs.edit().remove(FLAMECOMICS_REPAIR_PREF).apply()
+        liveCatalogAt = 0L
+        val remote = resolveRemoteExtensionEntries(repoUrl)
+        if (remote.isEmpty() || System.currentTimeMillis() - liveCatalogAt > LIVE_CATALOG_MAX_AGE_MS) {
+            Log.w(tag, "Library refresh postponed: live repo catalog unavailable")
+            refreshAvailableUpdates(repoUrl)
+            return
+        }
+        checkAndApplyUpdatesSilently(repoUrl)
+        if (_availableUpdates.value.isEmpty()) {
+            prefs.edit().putInt(LIBRARY_REFRESH_PREF, LIBRARY_REFRESH_VERSION).apply()
+            Log.i(tag, "Extension library refresh complete")
+        }
+        loadInstalledExtensions(force = true)
     }
 
     /**
@@ -328,7 +396,9 @@ class ExtensionManager(
         val prefs = context.getSharedPreferences("extension_cache", Context.MODE_PRIVATE)
         val flameInstalled = _installedExtensionInfos.value.find { it.packageName == FLAMECOMICS_PACKAGE }
         val needsOneTimeRepair = !prefs.getBoolean(FLAMECOMICS_REPAIR_PREF, false)
-        val belowMinimum = flameInstalled != null && flameInstalled.versionCode < FLAMECOMICS_MIN_VERSION_CODE
+        // Keiyoushi restarted versionCode with the lib-1.6 rewrite, so gate on the lib, not the code.
+        val belowMinimum = flameInstalled != null &&
+            isNewerExtensionLib(FLAMECOMICS_MIN_EXTENSION_LIB, flameInstalled.extensionLibVersion)
 
         if (flameInstalled == null) return@withContext
         if (!needsOneTimeRepair && !belowMinimum) return@withContext
@@ -378,8 +448,7 @@ class ExtensionManager(
     suspend fun checkAndApplyUpdatesSilently(repoUrl: String? = null) = withContext(Dispatchers.IO) {
         try {
             prepareForUpdateCheck()
-            val installedCodes = _installedExtensionInfos.value.associate { it.packageName to it.versionCode }
-            val updates = computeExtensionUpdates(resolveRemoteExtensionEntries(repoUrl), installedCodes)
+            val updates = computeUpdatesFor(resolveRemoteExtensionEntries(repoUrl), _installedExtensionInfos.value)
             if (updates.isEmpty()) {
                 _availableUpdates.value = emptyList()
                 return@withContext
@@ -407,6 +476,33 @@ class ExtensionManager(
         hotReloadExtension(entry.id)
     }
 
+    /**
+     * Live-fetch the repo index (pb first, json fallback via [ExtensionLoader.fetchRepoIndex]) from
+     * [repoUrl] or, when null, from ALL registered repos (default repo if none). One failing repo is
+     * logged and skipped. Entries are merged by package id keeping the highest versionCode and
+     * published to [_availableExtensions] so the update compare never relies on a stale cache.
+     */
+    private suspend fun refreshRemoteCatalogFromRepos(repoUrl: String? = null) {
+        try {
+            ensureDefaultRepo()
+            val urls = if (repoUrl != null) {
+                listOf(repoUrl)
+            } else {
+                repoDao.getAll().map { it.baseUrl }.ifEmpty { listOf(resolveRepoUrlForUpdates()) }
+            }
+            val merged = collectRepoEntries(
+                repoUrls = urls,
+                fetch = { url -> extensionLoader.fetchRepoIndex(url).extensions.map { it.withRepoContext(url) } },
+                onError = { url, e -> Log.w(tag, "Update check: failed to fetch repo $url: ${e.message}") },
+            )
+            if (merged.isNotEmpty()) {
+                publishLiveCatalog(filterAllowedRepoEntries(merged))
+            }
+        } catch (e: Exception) {
+            Log.w(tag, "Update check: remote catalog refresh failed (using cache): ${e.message}")
+        }
+    }
+
     /** Refresh installed extension version codes before a background update check. */
     suspend fun prepareForUpdateCheck() = withContext(Dispatchers.IO) {
         val systemInfos = extensionLoader.scanInstalledExtensions()
@@ -428,40 +524,50 @@ class ExtensionManager(
     }
 
     /**
-     * Remote extension catalog for update checks: prefer in-memory/cached index.pb entries,
-     * then fetch live repo index (not the deprecated JSON stub).
+     * Remote extension catalog for update checks. Live first: a catalog fetched from the repos in
+     * the last [LIVE_CATALOG_MAX_AGE_MS] is reused, otherwise every repo's index.pb is fetched.
+     * The in-memory list and the persisted cache are only fallbacks when the network fails, so
+     * a months-old cache can no longer hide newer extension builds.
      */
     private suspend fun resolveRemoteExtensionEntries(repoUrl: String?): List<RepoExtensionEntry> {
-        val live = _availableExtensions.value
-        if (live.isNotEmpty() && !isStaleStubCache(live) && live.hasAttachedRepoUrls()) return live
+        val inMemory = _availableExtensions.value
+        val usable = { entries: List<RepoExtensionEntry> ->
+            entries.isNotEmpty() && !isStaleStubCache(entries) && entries.hasAttachedRepoUrls()
+        }
+        val liveIsFresh = System.currentTimeMillis() - liveCatalogAt <= LIVE_CATALOG_MAX_AGE_MS
+        if (liveIsFresh && usable(inMemory)) return inMemory
 
-        val prefs = context.getSharedPreferences("extension_cache", Context.MODE_PRIVATE)
-        val cachedJson = prefs.getString("cached_extensions", null)
-        if (cachedJson != null) {
-            try {
-                val gson = com.google.gson.Gson()
-                val listType = object : com.google.gson.reflect.TypeToken<List<RepoExtensionEntry>>() {}.type
-                val cached: List<RepoExtensionEntry> = gson.fromJson(cachedJson, listType)
-                if (cached.isNotEmpty() && !isStaleStubCache(cached) && cached.hasAttachedRepoUrls()) {
-                    _availableExtensions.value = filterAllowedRepoEntries(cached)
-                    return filterAllowedRepoEntries(cached)
-                }
-            } catch (e: Exception) {
-                Log.w(tag, "Failed to parse cached extensions for update check", e)
-            }
+        ensureDefaultRepo()
+        val urls = if (repoUrl != null) {
+            listOf(repoUrl)
+        } else {
+            repoDao.getAll().map { it.baseUrl }.ifEmpty { listOf(resolveRepoUrlForUpdates()) }
+        }
+        val fetched = collectRepoEntries(
+            repoUrls = urls,
+            fetch = { url -> extensionLoader.fetchRepoIndex(url).extensions.map { it.withRepoContext(url) } },
+            onError = { url, e -> Log.w(tag, "Failed to fetch repo $url for update check: ${e.message}") },
+        )
+        if (fetched.isNotEmpty()) {
+            val allowed = filterAllowedRepoEntries(fetched)
+            publishLiveCatalog(allowed)
+            return allowed
         }
 
-        val url = repoUrl ?: resolveRepoUrlForUpdates()
+        if (usable(inMemory)) return inMemory
+        val prefs = context.getSharedPreferences("extension_cache", Context.MODE_PRIVATE)
+        val cachedJson = prefs.getString("cached_extensions", null) ?: return emptyList()
         return try {
-            extensionLoader.fetchRepoIndex(url).extensions
-                .map { it.withRepoContext(url) }
-                .also { entries ->
-                    if (entries.isNotEmpty()) {
-                        _availableExtensions.value = filterAllowedRepoEntries(entries)
-                    }
-                }
+            val gson = com.google.gson.Gson()
+            val listType = object : com.google.gson.reflect.TypeToken<List<RepoExtensionEntry>>() {}.type
+            val cached: List<RepoExtensionEntry> = gson.fromJson(cachedJson, listType)
+            if (usable(cached)) {
+                filterAllowedRepoEntries(cached).also { _availableExtensions.value = it }
+            } else {
+                emptyList()
+            }
         } catch (e: Exception) {
-            Log.w(tag, "Failed to fetch repo for update check: ${e.message}")
+            Log.w(tag, "Failed to parse cached extensions for update check", e)
             emptyList()
         }
     }
@@ -523,7 +629,7 @@ class ExtensionManager(
 
                 if (allEntries.isNotEmpty()) {
                     // Same extension can appear in multiple repos — keep first, unique by id
-                    _availableExtensions.value = filterAllowedRepoEntries(allEntries.distinctBy { it.id })
+                    publishLiveCatalog(filterAllowedRepoEntries(mergeRepoEntriesKeepingHighest(allEntries)))
                     try {
                         val newJson = gson.toJson(_availableExtensions.value)
                         prefs.edit()
@@ -576,29 +682,8 @@ class ExtensionManager(
 
         for (entry in defaultEntries) {
             val id = entry.id
-            val repoUrl = entry.repoUrl?.takeIf { it.isNotBlank() } ?: resolveRepoUrlForUpdates()
             try {
-                val downloadedFile = extensionLoader.downloadExtensionApk(repoUrl, entry.withRepoUrl(repoUrl))
-                val destFile = java.io.File(extensionLoader.extensionsDir, "${entry.id}.apk")
-                if (destFile.exists()) destFile.setWritable(true)
-                downloadedFile.copyTo(destFile, overwrite = true)
-                downloadedFile.delete()
-                extensionLoader.invalidateLoadedExtension(entry.id)
-
-                val existing = installedDao.getById(id)
-                if (existing != null) {
-                    installedDao.setTrusted(id, true)
-                } else {
-                    installedDao.insert(
-                        InstalledExtensionEntity(
-                            id = id,
-                            name = entry.name,
-                            isTrusted = true,
-                            versionCode = entry.versionCode,
-                        ),
-                    )
-                }
-
+                installExtensionEntry(entry)
                 installedAny = true
                 Log.i(tag, "Successfully auto-installed curated extension: $id")
             } catch (e: Exception) {
@@ -643,24 +728,33 @@ class ExtensionManager(
             return@withContext UpdateAllResult(0, 0, emptyList())
         }
 
+        if (!_isUpdatingAllExtensions.compareAndSet(false, true)) {
+            return@withContext UpdateAllResult(0, 0, emptyList())
+        }
+
         var succeeded = 0
         val failures = mutableListOf<Pair<String, String>>()
 
-        for (entry in pending) {
-            try {
-                installExtensionEntry(entry)
-                succeeded++
-            } catch (e: Exception) {
-                Log.e(tag, "Failed to update ${entry.id}", e)
-                failures.add(entry.id to (e.message ?: e.javaClass.simpleName))
+        try {
+            // Sequential; same apply path as the silent background updater.
+            for (entry in pending) {
+                try {
+                    applyExtensionUpdateSilently(entry)
+                    succeeded++
+                } catch (e: Exception) {
+                    Log.e(tag, "Failed to update ${entry.id}", e)
+                    failures.add(entry.id to (e.message ?: e.javaClass.simpleName))
+                }
             }
+
+            val failedIds = failures.map { it.first }.toSet()
+            _availableUpdates.value = pending.filter { it.id in failedIds }
+
+            prepareForUpdateCheck()
+            loadInstalledExtensions(force = true)
+        } finally {
+            _isUpdatingAllExtensions.value = false
         }
-
-        val failedIds = failures.map { it.first }.toSet()
-        _availableUpdates.value = pending.filter { it.id in failedIds }
-
-        prepareForUpdateCheck()
-        loadInstalledExtensions(force = true)
 
         UpdateAllResult(
             succeeded = succeeded,
@@ -705,31 +799,113 @@ class ExtensionManager(
             throw Exception("Only English or multi-language (all) extensions can be installed")
         }
 
-        val repoUrl = entry.repoUrl?.takeIf { it.isNotBlank() } ?: resolveRepoUrlForUpdates()
-
-        Log.i(tag, "Installing extension locally: $extensionId")
-        val downloadedFile = extensionLoader.downloadExtensionApk(repoUrl, entry.withRepoUrl(repoUrl))
-        val destFile = java.io.File(extensionLoader.extensionsDir, "${entry.id}.apk")
-        if (destFile.exists()) destFile.setWritable(true)
-        downloadedFile.copyTo(destFile, overwrite = true)
-        downloadedFile.delete()
-        extensionLoader.invalidateLoadedExtension(entry.id)
-
-        val existing = installedDao.getById(extensionId)
-        installedDao.insert(
-            InstalledExtensionEntity(
-                id = extensionId,
-                name = entry.name,
-                isTrusted = true,
-                versionCode = entry.versionCode,
-                dateInstalled = existing?.dateInstalled ?: System.currentTimeMillis(),
-            ),
+        // Parent repo is attached at fetch time. If a cached entry lost it, use the configured repo
+        // so download never fails with "has no repository URL" when a file name is known.
+        val repoUrl = entry.installableRepoUrl() ?: resolveRepoUrlForUpdates()
+        val resolvedEntry = entry.withRepoUrl(repoUrl)
+        val installedState = extensionInstaller.readInstalledState(extensionId)
+        val useSystemInstaller = ExtensionInstallRules.useSystemInstaller(
+            installedState,
+            systemInstalled = extensionLoader.isPackageInstalled(extensionId),
         )
+
+        Log.i(tag, "Installing extension: $extensionId (systemInstaller=$useSystemInstaller)")
+        val downloadedFile = extensionInstaller.downloadAndVerify(resolvedEntry, repoUrl, installedState)
+
+        if (useSystemInstaller) {
+            // Real Android package: update in place through PackageInstaller (session API).
+            try {
+                extensionInstaller.installIntoSystem(downloadedFile, entry, installedState)
+            } finally {
+                downloadedFile.delete()
+            }
+            persistInstalledRow(entry, trusted = true)
+            extensionLoader.invalidateLoadedExtension(entry.id)
+            _availableUpdates.update { updates -> updates.filter { it.id != extensionId } }
+            refreshTrustCache()
+            Log.i(tag, "Successfully updated system extension: $extensionId")
+            return
+        }
+
+        val destFile = ExtensionApkPaths.packageApkFile(extensionLoader.extensionsDir, entry.id)
+        val staged = File(extensionLoader.extensionsDir, "${entry.id}.apk.staging")
+        try {
+            if (staged.exists()) staged.delete()
+            downloadedFile.copyTo(staged, overwrite = true)
+        } finally {
+            downloadedFile.delete()
+        }
+
+        try {
+        val decision = extensionLoader.evaluateStagedApk(staged, expectedPackage = entry.id, expectedVersionCode = entry.versionCode)
+        when (decision) {
+            is ExtensionInstallDecision.Rejected -> {
+                staged.delete()
+                throw Exception(decision.reason)
+            }
+            is ExtensionInstallDecision.UnknownSigner -> {
+                val previous = extensionLoader.scanLocalExtensions().find { it.packageName == entry.id }
+                if (previous != null && extensionLoader.isApkTrustedForExecution(previous)) {
+                    staged.delete()
+                    throw Exception("Update rejected: signer is not trusted. The previous APK was kept.")
+                }
+                extensionLoader.commitStagedApk(staged, destFile)
+                persistInstalledRow(entry, trusted = false)
+                _untrustedExtensions.update { current ->
+                    current.filterNot { it.pkgName == entry.id } + Extension.Untrusted(
+                        id = entry.id,
+                        name = entry.name,
+                        version = entry.version,
+                        nsfw = entry.nsfw != 0,
+                        pkgName = entry.id,
+                        versionCode = entry.versionCode,
+                        signatureHash = decision.signatureHash,
+                    )
+                }
+                extensionLoader.invalidateLoadedExtension(entry.id)
+                refreshTrustCache()
+                throw Exception("Installed ${entry.name} but it is not trusted. Approve the signer to load it.")
+            }
+            is ExtensionInstallDecision.Trusted -> {
+                // In-place update: same signing key as the stored APK, or an official key.
+                // Unsigned local APKs are tolerated only in debug builds.
+                extensionInstaller.requireSignatureContinuity(
+                    staged,
+                    installedState,
+                    official = decision.official,
+                    allowUnsignedDebug = com.radiant.webtoon.BuildConfig.DEBUG,
+                )
+                if (!decision.official && decision.signatureHash.isNotBlank()) {
+                    signatureTrust.trust(decision.packageName, decision.versionCode, decision.signatureHash)
+                }
+                extensionLoader.commitStagedApk(staged, destFile)
+                persistInstalledRow(entry, trusted = true)
+            }
+        }
+        } finally {
+            // Never leave a half-installed staging file behind (no-op after a successful commit).
+            if (staged.exists()) staged.delete()
+        }
+
+        extensionLoader.invalidateLoadedExtension(entry.id)
 
         _availableUpdates.update { updates -> updates.filter { it.id != extensionId } }
 
         refreshTrustCache()
-        Log.i(tag, "Successfully installed and trusted extension: $extensionId")
+        Log.i(tag, "Successfully installed extension: $extensionId")
+    }
+
+    private suspend fun persistInstalledRow(entry: RepoExtensionEntry, trusted: Boolean) {
+        val existing = installedDao.getById(entry.id)
+        installedDao.insert(
+            InstalledExtensionEntity(
+                id = entry.id,
+                name = entry.name,
+                isTrusted = trusted,
+                versionCode = entry.versionCode,
+                dateInstalled = existing?.dateInstalled ?: System.currentTimeMillis(),
+            ),
+        )
     }
 
     /**
@@ -790,10 +966,11 @@ class ExtensionManager(
             val listType = object : com.google.gson.reflect.TypeToken<List<RepoExtensionEntry>>() {}.type
             val cached: List<RepoExtensionEntry> = gson.fromJson(cachedJson, listType)
             val filtered = filterAllowedRepoEntries(cached)
+                .filter { it.installableRepoUrl() != null }
             if (filtered.size != cached.size) {
                 prefs.edit().putString("cached_extensions", gson.toJson(filtered)).apply()
                 _availableExtensions.value = filtered
-                Log.i(tag, "Pruned ${cached.size - filtered.size} non-whitelisted entries from extension cache")
+                Log.i(tag, "Pruned ${cached.size - filtered.size} extension cache entries")
             }
         } catch (e: Exception) {
             Log.w(tag, "Failed to prune extension cache during purge", e)
@@ -901,7 +1078,7 @@ class ExtensionManager(
             val entries = filterAllowedRepoEntries(
                 index.extensions.map { it.withRepoContext(repoUrl) },
             )
-            _availableExtensions.value = entries
+            publishLiveCatalog(entries)
             try {
                 val gson = com.google.gson.Gson()
                 prefs.edit()
@@ -1042,6 +1219,16 @@ class ExtensionManager(
             )
             Log.i(tag, "Migrated extension repo URL from legacy JSON index to index.pb")
         }
+        // Any other Keiyoushi JSON mirror is a stub now; point it at index.pb as well.
+        for (repo in repoDao.getAll()) {
+            val url = repo.baseUrl
+            if (!url.contains("keiyoushi", ignoreCase = true)) continue
+            if (!url.endsWith(".json", ignoreCase = true)) continue
+            val pbUrl = normalizeRepoIndexUrl(url)
+            repoDao.delete(url)
+            if (repoDao.getByUrl(pbUrl) == null) repoDao.insert(repo.copy(baseUrl = pbUrl))
+            Log.i(tag, "Migrated Keiyoushi JSON repo $url -> $pbUrl")
+        }
     }
 
     private fun migrateExtensionCacheIfNeeded(prefs: android.content.SharedPreferences) {
@@ -1085,24 +1272,41 @@ class ExtensionManager(
      */
     private suspend fun hotReloadExtension(packageName: String) {
         loadMutex.withLock {
+            // Fresh PathClassLoader per version: drop the cached loader + read-only APK copy first.
+            // (A loader cannot unload classes, so old Source instances are dropped below, never reused.)
             extensionLoader.invalidateLoadedExtension(packageName)
 
             val systemInfos = extensionLoader.scanInstalledExtensions()
             val localInfos = extensionLoader.scanLocalExtensions()
             val info = mergeInstalledExtensionInfos(localInfos, systemInfos)
                 .find { it.packageName == packageName }
-                ?: return@withLock
+
+            // Drop every Source instance (and cached memo state) built from the old classes.
+            val removedKeys = sourceRegistry.filterValues { source ->
+                source is TachiyomiSourceAdapter && source.icon.contains(packageName)
+            }.keys.toList()
+            removedKeys.forEach { key ->
+                sourceRegistry.remove(key)?.let { ChapterMemoCache.clearSource(it.id) }
+            }
+
+            if (info == null) {
+                _installedExtensionInfos.update { list -> list.filter { it.packageName != packageName } }
+                _installedExtensions.update { current ->
+                    current.filterNot { it is TachiyomiSourceAdapter && it.icon.contains(packageName) }
+                }
+                return@withLock
+            }
 
             _installedExtensionInfos.update { list ->
                 list.filter { it.packageName != packageName } + info
             }
 
-            if (!_trustedPackages.value.contains(packageName)) return@withLock
-
-            val removedKeys = sourceRegistry.filterValues { source ->
-                source is TachiyomiSourceAdapter && source.icon.contains(packageName)
-            }.keys.toList()
-            removedKeys.forEach { sourceRegistry.remove(it) }
+            if (!_trustedPackages.value.contains(packageName)) {
+                _installedExtensions.update { current ->
+                    current.filterNot { it is TachiyomiSourceAdapter && it.icon.contains(packageName) }
+                }
+                return@withLock
+            }
 
             val adapters = loadAdaptersForExtension(info)
             val activeAdapters = adapters.filter { isSourceLanguageEnabled(it.lang) }
@@ -1122,8 +1326,19 @@ class ExtensionManager(
             applyPinnedSources()
 
             refreshExtensionFingerprint()
+            refreshBaseUrlRewriteRegistry()
             Log.i(tag, "Hot-reloaded extension in memory: $packageName (v${info.versionCode})")
         }
+    }
+
+    /**
+     * Targeted reload after an install/update: invalidates the old [dalvik.system.PathClassLoader]
+     * and read-only APK copy for [packageName], re-scans it (local + PackageManager), instantiates
+     * fresh Sources from a new loader, and republishes [installedExtensions] and
+     * [installedExtensionInfos]. No app restart and no full reload of other extensions.
+     */
+    suspend fun reloadExtension(packageName: String) = withContext(Dispatchers.IO) {
+        hotReloadExtension(packageName)
     }
 
     private suspend fun loadAdaptersForExtension(extInfo: ExtensionInfo): List<TachiyomiSourceAdapter> {
@@ -1146,10 +1361,23 @@ class ExtensionManager(
     private fun refreshExtensionFingerprint() {
         val allowedInfos = _installedExtensionInfos.value.filter { isPackageAllowed(it.packageName) }
         val trusted = _trustedPackages.value
-        lastLoadedFingerprint = allowedInfos
-            .filter { trusted.contains(it.packageName) }
-            .joinToString("|") { "${it.packageName}:${it.versionCode}" } +
-            "|advanced=${isAdvancedMode()}|langs=${_sourceLangs.value.joinToString(",")}"
+        lastLoadedFingerprint = ExtensionInstallRules.buildFingerprint(
+            allowedInfos.filter { trusted.contains(it.packageName) }.map(::fingerprintEntry),
+            advanced = isAdvancedMode(),
+            langs = _sourceLangs.value,
+        )
+    }
+
+    /** versionCode + APK path/mtime/size so a same-path replace is never skipped by the reload check. */
+    private fun fingerprintEntry(info: ExtensionInfo): String {
+        val apk = File(info.apkPath)
+        return ExtensionInstallRules.fingerprintEntry(
+            info.packageName,
+            info.versionCode,
+            info.apkPath,
+            apk.lastModified(),
+            apk.length(),
+        )
     }
 
     /**
@@ -1180,14 +1408,11 @@ class ExtensionManager(
                 val pkgInfo = context.packageManager.getPackageInfo(info.packageName, flags)
                 signatureTrust.isTrusted(pkgInfo, signatureTrust.getSignatures(pkgInfo))
             } catch (_: Exception) {
-                info.signatureHash?.equals(
-                    ExtensionSignatureTrust.OFFICIAL_KEIYOUSHI_FINGERPRINT,
-                    ignoreCase = true,
-                ) == true
+                info.signatureHash?.let(ExtensionSignatureTrust::isOfficialFingerprint) == true
             }
 
             val existing = installedDao.getById(info.packageName)
-            val shouldTrust = existing?.isTrusted == true || signatureOk
+            val shouldTrust = signatureOk
             if (!shouldTrust && !info.signatureHash.isNullOrBlank()) {
                 untrusted.add(
                     Extension.Untrusted(
@@ -1268,10 +1493,13 @@ class ExtensionManager(
                 )
                 _installedExtensionInfos.value = allowedInfos
 
-                val currentFingerprint = allowedInfos
-                    .filter { trusted.contains(it.packageName) }
-                    .joinToString("|") { "${it.packageName}:${it.versionCode}" } +
-                    "|advanced=$advanced|langs=${_sourceLangs.value.joinToString(",")}"
+                val currentFingerprint = ExtensionInstallRules.buildFingerprint(
+                    allowedInfos
+                        .filter { extensionLoader.isApkTrustedForExecution(it) }
+                        .map(::fingerprintEntry),
+                    advanced = advanced,
+                    langs = _sourceLangs.value,
+                )
 
                 // Skip even when the previous load produced 0 sources (e.g. all failed).
                 // Requiring isNotEmpty() caused a tight retry loop on Android 14+ writable-dex failures.
@@ -1288,11 +1516,11 @@ class ExtensionManager(
 
                 val perExtensionResults = allowedInfos
                     .filter { extInfo ->
-                        val isTrusted = trusted.contains(extInfo.packageName)
-                        if (!isTrusted) {
-                            Log.w(tag, "Extension NOT trusted: ${extInfo.packageName}. Skipping source load.")
+                        val executable = extensionLoader.isApkTrustedForExecution(extInfo)
+                        if (!executable) {
+                            Log.w(tag, "Extension NOT executable (signature): ${extInfo.packageName}. Skipping source load.")
                         }
-                        isTrusted
+                        executable
                     }
                     .map { extInfo ->
                         async(Dispatchers.IO) {
@@ -1490,6 +1718,7 @@ class ExtensionManager(
                 pkgName = info.packageName,
                 sources = sourceRegistry.values.filter { it is TachiyomiSourceAdapter && it.icon.contains(info.packageName) },
                 hasUpdate = hasUpdate,
+                updateAvailable = updateMatch?.toUpdateAvailable(),
                 downloadUrl = downloadUrl,
                 extensionLibVersion = info.extensionLibVersion,
                 libCompatibility = info.libCompatibility,
@@ -1522,11 +1751,11 @@ class ExtensionManager(
             // NSFW filter does not hide allowlisted packs (Manga18fx, Manhwa18.cc, etc.)
             .sortedBy { it.name.lowercase() }
 
-        return entries.map { entry ->
+        return entries.mapNotNull { entry ->
+            val repoUrl = entry.installableRepoUrl() ?: return@mapNotNull null
             val effectiveBaseUrl = entry.baseUrl ?: entry.sources?.firstOrNull()?.baseUrl ?: ""
-            val repoUrl = entry.repoUrl?.takeIf { it.isNotBlank() }
             val downloadUrl = entry.apkUrl?.takeIf { it.isNotBlank() }
-                ?: repoUrl?.let { buildExtensionApkUrl(it, entry.fileName) }
+                ?: buildExtensionApkUrl(repoUrl, entry.fileName)
 
             Extension.Available(
                 id = entry.id,

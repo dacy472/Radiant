@@ -26,7 +26,7 @@ class LocalLibrarySync(
         database.withTransaction {
             val existingManga = mangaDao.getAllBySource(sourceId)
             existingManga.filter { it.url !in scannedSeriesIds }.forEach { stale ->
-                chapterDao.deleteByManga(stale.url)
+                chapterDao.deleteByManga(stale.url, sourceId)
                 downloadedChapterDao.deleteByWebtoon(sourceId, stale.url)
                 mangaDao.delete(stale.url, sourceId)
             }
@@ -38,7 +38,7 @@ class LocalLibrarySync(
 
             for (series in scan.series) {
                 val existing = mangaDao.getManga(series.id, sourceId)
-                mangaDao.insert(
+                mangaDao.upsertFetchedMetadata(
                     Manga(
                         url = series.id,
                         source = sourceId,
@@ -52,7 +52,7 @@ class LocalLibrarySync(
                     ),
                 )
 
-                val existingChapters = chapterDao.getChapters(series.id).associateBy { it.url }
+                val existingChapters = chapterDao.getChapters(series.id, sourceId).associateBy { it.url }
                 chapterDao.insertAll(
                     series.chapters.map { ch ->
                         val prior = existingChapters[ch.id]
@@ -63,6 +63,7 @@ class LocalLibrarySync(
                             read = prior?.read ?: false,
                             bookmark = prior?.bookmark ?: false,
                             last_page_read = prior?.last_page_read ?: 0,
+                            last_page_offset = prior?.last_page_offset ?: 0,
                             date_fetch = prior?.date_fetch ?: 0L,
                             date_upload = prior?.date_upload ?: 0L,
                             chapter_number = ch.number?.toFloat() ?: -1f,

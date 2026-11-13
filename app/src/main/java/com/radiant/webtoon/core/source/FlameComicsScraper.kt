@@ -221,7 +221,7 @@ class FlameComicsScraper(
     /**
      * Parse Flame chapter image metadata from `__NEXT_DATA__` or `/_next/data` JSON.
      */
-    private fun parseChapterImageUrls(jsonBody: String, preferPropsPath: Boolean): List<String> {
+    internal fun parseChapterImageUrls(jsonBody: String, preferPropsPath: Boolean): List<String> {
         return try {
             val root = json.parseToJsonElement(jsonBody).jsonObject
             val chapter = findChapterObject(root, preferPropsPath) ?: run {

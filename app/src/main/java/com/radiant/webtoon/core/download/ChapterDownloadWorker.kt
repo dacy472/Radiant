@@ -6,19 +6,22 @@ import android.util.Log
 import androidx.documentfile.provider.DocumentFile
 import com.radiant.webtoon.core.database.DownloadStatus
 import com.radiant.webtoon.core.database.DownloadTask
+import com.radiant.webtoon.core.image.ImageFetchRetry
 import com.radiant.webtoon.core.repository.WebtoonRepository
 import com.radiant.webtoon.core.service.DownloadService
 import com.radiant.webtoon.core.settings.SettingsManager
+import com.radiant.webtoon.core.source.PageRefs
+import com.radiant.webtoon.core.source.TachiyomiSourceAdapter
 import eu.kanade.tachiyomi.network.NetworkHelper
 import kotlinx.coroutines.CancellationException
-import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.firstOrNull
 import kotlinx.coroutines.isActive
+import kotlinx.coroutines.withContext
 import okhttp3.Headers
 import okhttp3.Request
 import uy.kohesive.injekt.injectLazy
 import java.io.File
-import java.io.FileOutputStream
 import kotlin.coroutines.coroutineContext
 import kotlin.math.roundToInt
 
@@ -36,27 +39,22 @@ class ChapterDownloadWorker(
     private val networkHelper: NetworkHelper by injectLazy()
 
     suspend fun download(task: DownloadTask, isCancelled: () -> Boolean): DownloadTask {
-        val pages = repository.getChapterPages(task.sourceId, task.chapterId)
-        if (pages.isEmpty()) {
-            val failed = task.copy(status = DownloadStatus.FAILED)
-            repository.updateDownload(failed)
-            return failed
-        }
-
-        val sourceName = webtoonRepository.extensionManager.getSource(task.sourceId)?.name
-            ?: task.sourceId
-        val total = pages.size
-        var current = task.copy(
-            status = DownloadStatus.DOWNLOADING,
-            totalPages = total,
-            progress = 0,
-            downloadedPages = 0,
-        )
-        repository.updateDownload(current)
-        onProgress(current)
-
-        val customUriStr = settingsManager.downloadLocationUri.firstOrNull()
+        var current = task.copy(status = DownloadStatus.DOWNLOADING, progress = 0)
         return try {
+            val source = webtoonRepository.extensionManager.getSource(task.sourceId)
+                ?: throw IllegalStateException("source-not-found")
+            val pages = repository.getChapterPages(task.sourceId, task.chapterId, task.webtoonId)
+            if (pages.isEmpty()) {
+                throw IllegalStateException("empty-pages")
+            }
+
+            val sourceName = source.name
+            val total = pages.size
+            current = current.copy(totalPages = total, downloadedPages = 0)
+            repository.updateDownload(current)
+            onProgress(current)
+
+            val customUriStr = settingsManager.downloadLocationUri.firstOrNull()
             val localPath = if (customUriStr != null) {
                 downloadToSaf(customUriStr, sourceName, current, pages, isCancelled)
             } else {
@@ -109,26 +107,44 @@ class ChapterDownloadWorker(
         val baseDir = context.getExternalFilesDir(null) ?: context.filesDir
         val dir = DownloadPathUtils.defaultChapterDir(
             baseDir,
-            sourceName,
-            task.webtoonTitle,
-            task.chapterTitle,
+            sourceId = task.sourceId,
+            mangaId = task.webtoonId,
+            chapterId = task.chapterId,
+            sourceName = sourceName,
+            mangaTitle = task.webtoonTitle,
+            chapterTitle = task.chapterTitle,
         )
         if (!dir.exists()) dir.mkdirs()
 
         pages.forEachIndexed { index, url ->
             if (isCancelled() || !coroutineContext.isActive) throw CancellationException()
             val targetFile = File(dir, DownloadPathUtils.pageFileName(index))
-            if (!(targetFile.exists() && targetFile.length() > 0)) {
+            if (!(targetFile.exists() && ImagePayloadValidator.isImage(targetFile))) {
+                val tmp = File(dir, DownloadPathUtils.pageFileName(index) + ".part")
                 val startTime = System.currentTimeMillis()
                 val bytes = downloadImageWithRetry(url, task.sourceId) { output ->
-                    FileOutputStream(targetFile).use { fileOut ->
-                        output.copyTo(fileOut)
-                    }
+                    tmp.outputStream().use { fileOut -> output.copyTo(fileOut) }
+                }
+                if (!ImagePayloadValidator.isImage(tmp)) {
+                    tmp.delete()
+                    throw IllegalStateException("invalid image payload")
+                }
+                if (targetFile.exists() && !targetFile.delete()) {
+                    tmp.delete()
+                    throw IllegalStateException("failed to replace page file")
+                }
+                if (!tmp.renameTo(targetFile)) {
+                    tmp.delete()
+                    throw IllegalStateException("failed to commit page file")
                 }
                 updateSpeed(bytes, System.currentTimeMillis() - startTime)
             }
             updateTaskProgress(task, index + 1, pages.size)
         }
+        val verified = pages.indices.all { index ->
+            ImagePayloadValidator.isImage(File(dir, DownloadPathUtils.pageFileName(index)))
+        }
+        if (!verified) throw IllegalStateException("incomplete chapter pages")
         return dir.absolutePath
     }
 
@@ -142,9 +158,12 @@ class ChapterDownloadWorker(
         val baseDir = DocumentFile.fromTreeUri(context, Uri.parse(customUriStr))
             ?: throw IllegalStateException("Invalid SAF download location")
         val relative = DownloadPathUtils.chapterRelativePath(
-            sourceName,
-            task.webtoonTitle,
-            task.chapterTitle,
+            sourceId = task.sourceId,
+            mangaId = task.webtoonId,
+            chapterId = task.chapterId,
+            sourceName = sourceName,
+            mangaTitle = task.webtoonTitle,
+            chapterTitle = task.chapterTitle,
         )
         val chapterDir = ensureSafDirectory(baseDir, relative.split(File.separator))
             ?: throw IllegalStateException("Failed to create SAF directory")
@@ -152,21 +171,35 @@ class ChapterDownloadWorker(
         pages.forEachIndexed { index, url ->
             if (isCancelled() || !coroutineContext.isActive) throw CancellationException()
             val fileName = DownloadPathUtils.pageFileName(index)
+            val partName = "$fileName.part"
+            chapterDir.findFile(partName)?.delete()
             var file = chapterDir.findFile(fileName)
-            if (file == null) {
+            val existingValid = file != null && file.length() > 12L
+            if (!existingValid) {
+                file?.delete()
                 file = chapterDir.createFile("image/jpeg", fileName)
-            }
-            if (file != null && file.length() == 0L) {
+                    ?: throw IllegalStateException("createFile returned null")
                 val startTime = System.currentTimeMillis()
                 val bytes = downloadImageWithRetry(url, task.sourceId) { output ->
-                    context.contentResolver.openOutputStream(file.uri)?.use { out ->
+                    context.contentResolver.openOutputStream(file.uri, "w")?.use { out ->
                         output.copyTo(out)
                     } ?: throw IllegalStateException("Failed to open SAF output stream")
+                }
+                val header = ByteArray(16)
+                val read = context.contentResolver.openInputStream(file.uri)?.use { it.read(header) } ?: 0
+                if (!ImagePayloadValidator.isImage(header.copyOf(read.coerceAtLeast(0)))) {
+                    file.delete()
+                    throw IllegalStateException("invalid image payload")
                 }
                 updateSpeed(bytes, System.currentTimeMillis() - startTime)
             }
             updateTaskProgress(task, index + 1, pages.size)
         }
+        val verified = pages.indices.all { index ->
+            val file = chapterDir.findFile(DownloadPathUtils.pageFileName(index))
+            file != null && file.length() > 12L
+        }
+        if (!verified) throw IllegalStateException("incomplete chapter pages")
         return chapterDir.uri.toString()
     }
 
@@ -199,32 +232,43 @@ class ChapterDownloadWorker(
         url: String,
         sourceId: String,
         writeBody: (java.io.InputStream) -> Unit,
-    ): Long {
-        var lastError: Exception? = null
-        repeat(MAX_IMAGE_RETRY_ATTEMPTS) { attempt ->
-            try {
-                val request = buildImageRequest(url, sourceId)
-                var totalBytes = 0L
-                networkHelper.client.newCall(request).execute().use { response ->
+    ): Long = ImageFetchRetry.run(MAX_IMAGE_RETRY_ATTEMPTS) {
+        // Same path as the reader: the extension's own client + imageRequest (Mihon parity).
+        val adapter = webtoonRepository.extensionManager.getSource(sourceId) as? TachiyomiSourceAdapter
+        val response = adapter?.openPageImage(url)
+            ?: if (PageRefs.isDeferred(url)) {
+                throw IllegalStateException("Source $sourceId cannot resolve this page")
+            } else {
+                withContext(Dispatchers.IO) {
+                    networkHelper.client.newCall(buildImageRequest(url, sourceId)).execute()
+                }.also { response ->
                     if (!response.isSuccessful) {
-                        throw Exception("HTTP ${response.code}")
+                        response.close()
+                        throw java.io.IOException("HTTP ${response.code}")
                     }
-                    val body = response.body ?: throw Exception("Empty body")
-                    body.byteStream().use { input ->
-                        writeBody(input)
-                        totalBytes = body.contentLength().coerceAtLeast(0L)
-                    }
-                }
-                return totalBytes
-            } catch (e: Exception) {
-                if (e is CancellationException) throw e
-                lastError = e
-                if (attempt < MAX_IMAGE_RETRY_ATTEMPTS - 1) {
-                    delay(RETRY_BASE_DELAY_MS * (1L shl attempt))
                 }
             }
+        response.use {
+            var totalBytes = 0L
+            withContext(Dispatchers.IO) {
+                it.body.byteStream().use { input ->
+                    writeBody(object : java.io.FilterInputStream(input) {
+                        override fun read(): Int {
+                            val value = super.read()
+                            if (value >= 0) totalBytes++
+                            return value
+                        }
+
+                        override fun read(b: ByteArray, off: Int, len: Int): Int {
+                            val count = super.read(b, off, len)
+                            if (count > 0) totalBytes += count
+                            return count
+                        }
+                    })
+                }
+            }
+            totalBytes
         }
-        throw lastError ?: Exception("Image download failed")
     }
 
     private fun headersFor(sourceId: String): Headers {
@@ -260,7 +304,6 @@ class ChapterDownloadWorker(
 
     companion object {
         private const val TAG = "ChapterDownloadWorker"
-        const val MAX_IMAGE_RETRY_ATTEMPTS = 3
-        private const val RETRY_BASE_DELAY_MS = 1_000L
+        const val MAX_IMAGE_RETRY_ATTEMPTS = ImageFetchRetry.MAX_ATTEMPTS
     }
 }

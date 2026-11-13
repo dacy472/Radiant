@@ -107,12 +107,12 @@ class LibraryViewModel(private val repository: WebtoonRepository) : ViewModel() 
         val downloadCounts = downloads.groupingBy { "${it.sourceId}|${it.webtoonId}" }.eachCount()
         val history = runCatching { repository.getHistory() }.getOrDefault(emptyList())
         val historyKeys = history.map { "${it.source_id}|${it.webtoon_id}" }.toSet()
-        val chaptersByManga = allChapters?.groupBy { it.manga_id }
+        val chaptersByManga = allChapters?.groupBy { it.source to it.manga_id }
 
         _displayItems.value = favorites.map { manga ->
             val key = "${manga.source}|${manga.url}"
-            val chapters = chaptersByManga?.get(manga.url)
-                ?: repository.getChaptersForManga(manga.url)
+            val chapters = chaptersByManga?.get(manga.source to manga.url)
+                ?: repository.getChaptersForManga(manga.url, manga.source)
             val downloadedCount = downloadCounts[key] ?: 0
             LibraryDisplayItem(
                 manga = manga,

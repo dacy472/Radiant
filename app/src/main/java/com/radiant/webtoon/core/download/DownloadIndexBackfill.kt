@@ -205,7 +205,7 @@ object DownloadIndexBackfill {
         val manga = library.firstOrNull { it.title.trim().equals(mangaTitle, ignoreCase = true) }
             ?: library.firstOrNull { it.title.trim().lowercase() == normalizedManga }
             ?: return null
-        val chapters = chapterDao.getChapters(manga.url)
+        val chapters = chapterDao.getChapters(manga.url, manga.source)
         val chapter = chapters.firstOrNull { it.name.trim().equals(chapterTitle, ignoreCase = true) }
             ?: chapters.firstOrNull { it.name.trim().lowercase() == normalizedChapter }
             ?: return null

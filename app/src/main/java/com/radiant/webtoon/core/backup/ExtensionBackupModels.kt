@@ -7,8 +7,3 @@ data class InstalledExtensionBackup(
     @SerializedName("name") val name: String,
     @SerializedName("isTrusted") val isTrusted: Boolean,
 )
-
-data class SourcePreferencesBackup(
-    @SerializedName("sourceId") val sourceId: String,
-    @SerializedName("prefs") val prefs: Map<String, String?>,
-)
