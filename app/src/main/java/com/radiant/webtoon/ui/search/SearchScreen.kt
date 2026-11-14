@@ -18,6 +18,7 @@ import coil.compose.AsyncImage
 import com.radiant.webtoon.core.model.SourceSearchStatus
 import com.radiant.webtoon.core.model.Webtoon
 import com.radiant.webtoon.ui.components.WebtoonThumbnailCard
+import com.radiant.webtoon.ui.components.coverSharedKey
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -134,7 +135,7 @@ fun SearchScreen(
             )
         }
     ) { paddingValues ->
-        Column(modifier = Modifier.fillMaxSize().padding(paddingValues)) {
+        Column(modifier = Modifier.fillMaxSize().padding(top = paddingValues.calculateTopPadding())) {
             if (isSearching) {
                 LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
             }
@@ -188,7 +189,7 @@ fun SearchScreen(
             } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = 80.dp)
+                    contentPadding = PaddingValues(bottom = paddingValues.calculateBottomPadding() + 16.dp)
                 ) {
                     itemsIndexed(
                         displaySources.distinctBy { it.id },
@@ -282,16 +283,19 @@ fun SearchScreen(
                                                 }
                                             ) { _, webtoon ->
                                                 Box(modifier = Modifier.width(110.dp)) {
+                                                    val webtoonKey = webtoon.url?.takeIf { it.isNotBlank() } ?: webtoon.id
                                                     WebtoonThumbnailCard(
                                                         webtoon = webtoon,
                                                         onClick = {
                                                             if (migrateFromManga != null) {
                                                                 showMigrationDialog = source.id to webtoon
                                                             } else {
-                                                                onWebtoonClick(source.id, webtoon.url?.takeIf { it.isNotBlank() } ?: webtoon.id)
+                                                                onWebtoonClick(source.id, webtoonKey)
                                                             }
                                                         },
-                                                        sourceId = source.id
+                                                        sourceId = source.id,
+                                                        compact = true,
+                                                        sharedKey = coverSharedKey(source.id, webtoonKey),
                                                     )
                                                 }
                                             }

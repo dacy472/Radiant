@@ -13,6 +13,7 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -57,11 +58,14 @@ fun HistoryScreen(
     val dateFormatPattern by (androidx.compose.ui.platform.LocalContext.current.applicationContext as WebtoonApplication)
         .settingsManager.dateFormat.collectAsState(initial = "MM/dd/yyyy")
     var showClearDialog by remember { mutableStateOf(false) }
+    val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
 
     Scaffold(
+        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
             TopAppBar(
-                title = { Text("History") },
+                title = { com.radiant.webtoon.ui.components.RadiantScreenTitle("History") },
+                scrollBehavior = scrollBehavior,
                 actions = {
                     if (historyItems.isNotEmpty()) {
                         IconButton(onClick = { showClearDialog = true }) {
@@ -122,7 +126,7 @@ fun HistoryScreen(
                 modifier = Modifier
                     .fillMaxSize()
                     .padding(padding),
-                contentPadding = PaddingValues(top = 8.dp, bottom = 80.dp)
+                contentPadding = PaddingValues(top = 8.dp, bottom = 16.dp)
             ) {
                 items(historyItems, key = { it.id }) { item ->
                     HistoryItemRow(

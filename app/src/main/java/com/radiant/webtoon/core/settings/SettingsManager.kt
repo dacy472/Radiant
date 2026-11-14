@@ -17,6 +17,7 @@ class SettingsManager(private val context: Context) {
         val NSFW_FILTER = booleanPreferencesKey("nsfw_filter")
         val READING_DIRECTION = stringPreferencesKey("reading_direction")
         val THEME_MODE = stringPreferencesKey("theme_mode")
+        val LIBRARY_DISPLAY_MODE = stringPreferencesKey("library_display_mode")
         val DATE_FORMAT = stringPreferencesKey("date_format")
         
         val UPDATE_FREQUENCY = stringPreferencesKey("update_frequency")
@@ -100,6 +101,12 @@ class SettingsManager(private val context: Context) {
 
     suspend fun setThemeMode(mode: String) {
         context.dataStore.edit { it[THEME_MODE] = mode }
+    }
+
+    // Library grid: "compact" (title over cover) or "comfortable" (title below cover)
+    val libraryDisplayMode: Flow<String> = context.dataStore.data.map { it[LIBRARY_DISPLAY_MODE] ?: "compact" }
+    suspend fun setLibraryDisplayMode(mode: String) {
+        context.dataStore.edit { it[LIBRARY_DISPLAY_MODE] = mode }
     }
 
     // Appearance

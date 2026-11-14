@@ -17,7 +17,10 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.Shadow
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
@@ -40,7 +43,7 @@ import okhttp3.Headers
  * which fails for sites that serve covers from a different CDN host than their `baseUrl`.
  */
 @Composable
-internal fun rememberSourceImageHeaders(
+fun rememberSourceImageHeaders(
     manga: Manga? = null,
     source: Source? = null,
     sourceId: String? = null,
@@ -105,45 +108,64 @@ fun UnreadCountBadge(
     CoverCountBadge(count = count, modifier = modifier)
 }
 
+/** Cover request size shared by grid cards and the details header so the header hits Coil's memory cache. */
+const val COVER_REQUEST_WIDTH = 360
+const val COVER_REQUEST_HEIGHT = 540
+
+private val CoverScrim = Brush.verticalGradient(
+    0f to Color.Transparent,
+    0.45f to Color.Black.copy(alpha = 0.25f),
+    1f to Color.Black.copy(alpha = 0.85f),
+)
+
+/**
+ * Library / browse cover tile. [compact] overlays the title on a bottom scrim (Mihon "compact grid");
+ * otherwise the title sits below the cover. [sharedKey] drives the cover → details morph.
+ */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 fun WebtoonThumbnailCard(
     webtoon: Webtoon,
     onClick: () -> Unit,
+    modifier: Modifier = Modifier,
     onLongClick: (() -> Unit)? = null,
     sourceId: String? = null,
     manga: Manga? = null,
     unreadCount: Int = 0,
     downloadedCount: Int = 0,
+    compact: Boolean = false,
+    sharedKey: String? = null,
 ) {
     val coverHeaders = rememberSourceImageHeaders(manga = manga, sourceId = sourceId ?: manga?.source)
     val interactionSource = remember { MutableInteractionSource() }
     val pressed by interactionSource.collectIsPressedAsState()
     val scale by animateFloatAsState(
-        targetValue = if (pressed) 0.96f else 1f,
-        animationSpec = AppMotion.press(),
+        targetValue = if (pressed) 0.95f else 1f,
+        animationSpec = AppMotion.bouncy(),
         label = "libraryCardScale",
     )
+    val coverShape = RoundedCornerShape(6.dp)
     Column(
-        modifier = Modifier
+        modifier = modifier
             .fillMaxWidth()
             .graphicsLayer {
                 scaleX = scale
                 scaleY = scale
             }
+            .clip(coverShape)
             .combinedClickable(
                 interactionSource = interactionSource,
                 indication = LocalIndication.current,
                 onClick = onClick,
                 onLongClick = onLongClick,
             )
-            .padding(4.dp)
     ) {
         Box(
             modifier = Modifier
                 .fillMaxWidth()
                 .aspectRatio(2f / 3f)
-                .clip(RoundedCornerShape(8.dp)),
+                .sharedCover(sharedKey)
+                .clip(coverShape),
         ) {
             RadiantAsyncImage(
                 url = webtoon.thumbnail,
@@ -152,50 +174,77 @@ fun WebtoonThumbnailCard(
                 headers = coverHeaders,
                 manga = manga,
                 sourceId = sourceId ?: manga?.source,
-                widthDp = 360,
-                heightDp = 540,
+                widthDp = COVER_REQUEST_WIDTH,
+                heightDp = COVER_REQUEST_HEIGHT,
                 precision = Precision.INEXACT,
                 scale = Scale.FILL,
                 contentScale = ContentScale.Crop,
+                loading = { Box(Modifier.fillMaxSize().shimmerEffect()) },
                 error = { CoverErrorPlaceholder(Modifier.fillMaxSize()) },
             )
-            if (unreadCount > 0) {
+            Row(
+                modifier = Modifier
+                    .align(Alignment.TopStart)
+                    .padding(4.dp),
+                horizontalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                if (unreadCount > 0) {
+                    Box(
+                        modifier = Modifier
+                            .background(
+                                color = MaterialTheme.colorScheme.tertiary,
+                                shape = RoundedCornerShape(percent = 50),
+                            )
+                            .padding(horizontal = 8.dp, vertical = 3.dp),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text(
+                            text = if (unreadCount > 999) "999+" else unreadCount.toString(),
+                            color = MaterialTheme.colorScheme.onTertiary,
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                        )
+                    }
+                }
+                CoverCountBadge(
+                    count = downloadedCount,
+                    containerColor = Color(0xCC2E7D32),
+                )
+            }
+            if (compact) {
                 Box(
                     modifier = Modifier
-                        .align(Alignment.TopStart)
-                        .padding(4.dp)
-                        .background(
-                            color = MaterialTheme.colorScheme.primary,
-                            shape = RoundedCornerShape(percent = 50),
-                        )
-                        .padding(horizontal = 8.dp, vertical = 3.dp),
-                    contentAlignment = Alignment.Center,
-                ) {
-                    Text(
-                        text = if (unreadCount > 999) "999+" else unreadCount.toString(),
-                        color = MaterialTheme.colorScheme.onPrimary,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                    )
-                }
+                        .align(Alignment.BottomCenter)
+                        .fillMaxWidth()
+                        .fillMaxHeight(0.42f)
+                        .background(CoverScrim),
+                )
+                Text(
+                    text = webtoon.title,
+                    style = MaterialTheme.typography.labelLarge.copy(
+                        shadow = Shadow(color = Color.Black, offset = Offset(0f, 1f), blurRadius = 4f),
+                    ),
+                    color = Color.White,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier
+                        .align(Alignment.BottomStart)
+                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                )
             }
-            CoverCountBadge(
-                count = downloadedCount,
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(6.dp),
-                containerColor = Color(0xCC2E7D32),
+        }
+        if (!compact) {
+            Text(
+                text = webtoon.title,
+                style = MaterialTheme.typography.bodyMedium,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 2,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.padding(horizontal = 2.dp, vertical = 4.dp),
             )
         }
-        Text(
-            text = webtoon.title,
-            style = MaterialTheme.typography.bodyMedium,
-            fontWeight = FontWeight.Bold,
-            maxLines = 2,
-            overflow = TextOverflow.Ellipsis,
-            modifier = Modifier.padding(top = 4.dp)
-        )
     }
 }
 

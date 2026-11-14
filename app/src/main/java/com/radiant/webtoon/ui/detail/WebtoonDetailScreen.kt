@@ -29,8 +29,20 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.*
 import androidx.compose.material3.*
-import androidx.compose.material3.pulltorefresh.PullToRefreshContainer
+import androidx.compose.animation.core.Animatable
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
+import androidx.compose.material3.pulltorefresh.pullToRefresh
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.unit.Dp
+import com.radiant.webtoon.ui.components.AppMotion
+import com.radiant.webtoon.ui.components.COVER_REQUEST_HEIGHT
+import com.radiant.webtoon.ui.components.COVER_REQUEST_WIDTH
+import com.radiant.webtoon.ui.components.coverSharedKey
+import com.radiant.webtoon.ui.components.sharedCover
+import com.radiant.webtoon.ui.components.shimmerEffect
 import androidx.compose.runtime.*
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.ui.Alignment
@@ -129,7 +141,6 @@ fun WebtoonDetailScreen(
         }
     }
 
-    // PullToRefreshBox is not in Compose BOM 2024.02.01; PullToRefreshContainer is.
     val pullToRefreshState = rememberPullToRefreshState()
     val listState = rememberLazyListState()
     val headerParallaxY by remember {
@@ -144,19 +155,22 @@ fun WebtoonDetailScreen(
     val resumeFabExpanded by remember {
         derivedStateOf { !listState.isScrollInProgress || listState.firstVisibleItemIndex == 0 }
     }
-
-    if (pullToRefreshState.isRefreshing && !isInSelectionMode) {
-        LaunchedEffect(true) {
-            viewModel.refreshFromNetwork()
+    val solidBarDistancePx = with(LocalDensity.current) { 160.dp.toPx() }
+    val topBarSolidFraction by remember {
+        derivedStateOf {
+            if (listState.firstVisibleItemIndex > 0) {
+                1f
+            } else {
+                (listState.firstVisibleItemScrollOffset / solidBarDistancePx).coerceIn(0f, 1f)
+            }
         }
     }
-
-    LaunchedEffect(isRefreshing) {
-        if (isRefreshing) {
-            if (!pullToRefreshState.isRefreshing) pullToRefreshState.startRefresh()
-        } else {
-            pullToRefreshState.endRefresh()
-        }
+    val statusBarTop = WindowInsets.statusBars.asPaddingValues().calculateTopPadding()
+    val sourceName = remember(sourceId) {
+        (context.applicationContext as? com.radiant.webtoon.WebtoonApplication)
+            ?.extensionManager
+            ?.getSource(sourceId)
+            ?.name
     }
 
     Scaffold(
@@ -189,26 +203,32 @@ fun WebtoonDetailScreen(
                         onSelectAll = { viewModel.selectAll() },
                     )
                 } else {
-                    TopAppBar(
-                        title = { },
+                    CenterAlignedTopAppBar(
+                        title = {
+                            val showSource = topBarSolidFraction < 0.5f
+                            Text(
+                                text = if (showSource) sourceName ?: "Details" else webtoon?.title.orEmpty(),
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis,
+                            )
+                        },
                         navigationIcon = {
                             IconButton(onClick = onBackClick) {
-                                Icon(Icons.Default.ArrowBack, contentDescription = "Back", tint = Color.White)
+                                Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
                             }
                         },
                         actions = {
                             IconButton(
-                                onClick = { onWebViewClick(viewModel.getMangaPageUrl()) },
+                                onClick = {
+                                    viewModel.downloadUnread(context)
+                                    Toast.makeText(context, "Queued unread chapters", Toast.LENGTH_SHORT).show()
+                                },
                             ) {
-                                Icon(
-                                    Icons.Default.Public,
-                                    contentDescription = "Open in WebView",
-                                    tint = Color.White,
-                                )
+                                Icon(Icons.Default.Download, contentDescription = "Download unread")
                             }
                             Box {
                                 IconButton(onClick = { showMenu = true }) {
-                                    Icon(Icons.Default.MoreVert, contentDescription = "More options", tint = Color.White)
+                                    Icon(Icons.Default.MoreVert, contentDescription = "More options")
                                 }
                                 DropdownMenu(
                                     expanded = showMenu,
@@ -220,15 +240,6 @@ fun WebtoonDetailScreen(
                                         onClick = {
                                             showMenu = false
                                             viewModel.refreshFromNetwork()
-                                        }
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Download unread") },
-                                        leadingIcon = { Icon(Icons.Default.Download, contentDescription = null) },
-                                        onClick = {
-                                            showMenu = false
-                                            viewModel.downloadUnread(context)
-                                            Toast.makeText(context, "Queued unread chapters", Toast.LENGTH_SHORT).show()
                                         }
                                     )
                                     DropdownMenuItem(
@@ -253,11 +264,17 @@ fun WebtoonDetailScreen(
                                 }
                             }
                         },
-                        colors = TopAppBarDefaults.topAppBarColors(containerColor = Color.Transparent),
+                        colors = TopAppBarDefaults.centerAlignedTopAppBarColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceContainer.copy(alpha = topBarSolidFraction),
+                            navigationIconContentColor = MaterialTheme.colorScheme.onSurface,
+                            actionIconContentColor = MaterialTheme.colorScheme.onSurface,
+                            titleContentColor = MaterialTheme.colorScheme.onSurface,
+                        ),
                     )
                 }
             }
         },
+        floatingActionButtonPosition = FabPosition.Center,
         floatingActionButton = {
             val target = resumeTarget
             AnimatedVisibility(
@@ -278,12 +295,11 @@ fun WebtoonDetailScreen(
         Box(
             modifier = Modifier
                 .fillMaxSize()
-                .then(
-                    if (!isInSelectionMode) {
-                        Modifier.nestedScroll(pullToRefreshState.nestedScrollConnection)
-                    } else {
-                        Modifier
-                    }
+                .pullToRefresh(
+                    isRefreshing = isRefreshing,
+                    state = pullToRefreshState,
+                    enabled = !isInSelectionMode,
+                    onRefresh = { viewModel.refreshFromNetwork() },
                 )
         ) {
             if (isLoading && webtoon == null && chapters.isEmpty()) {
@@ -291,17 +307,16 @@ fun WebtoonDetailScreen(
             } else {
                 LazyColumn(
                     state = listState,
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(bottom = paddingValues.calculateBottomPadding())
+                    modifier = Modifier.fillMaxSize(),
+                    contentPadding = PaddingValues(bottom = paddingValues.calculateBottomPadding()),
                 ) {
                     item {
                         WebtoonHeader(
                             webtoon,
                             sourceId,
-                            isFavorite,
+                            webtoonId = webtoonId,
+                            topInset = statusBarTop + TopBarHeight,
                             parallaxY = headerParallaxY,
-                            onToggleFavorite = { viewModel.toggleFavorite() },
                         )
                     }
                     error?.let { message ->
@@ -326,7 +341,8 @@ fun WebtoonDetailScreen(
                     }
                     item {
                         WebtoonActions(
-                            webtoonUrl = webtoon?.id ?: webtoonId,
+                            isFavorite = isFavorite,
+                            onToggleFavorite = { viewModel.toggleFavorite() },
                             onWebViewClick = {
                                 onWebViewClick(viewModel.getMangaPageUrl())
                             },
@@ -340,11 +356,24 @@ fun WebtoonDetailScreen(
                     item {
                         WebtoonDescription(webtoon?.description)
                     }
+                    val genres = webtoon?.genres.orEmpty().filter { it.isNotBlank() }
+                    if (genres.isNotEmpty()) {
+                        item {
+                            LazyRow(
+                                contentPadding = PaddingValues(horizontal = 16.dp),
+                                horizontalArrangement = Arrangement.spacedBy(8.dp),
+                            ) {
+                                items(genres) { genre ->
+                                    SuggestionChip(onClick = {}, label = { Text(genre) })
+                                }
+                            }
+                        }
+                    }
                     item {
                         Text(
                             text = "${chapters.size} chapters",
                             style = MaterialTheme.typography.titleMedium,
-                            modifier = Modifier.padding(16.dp),
+                            modifier = Modifier.padding(start = 16.dp, end = 16.dp, top = 16.dp, bottom = 4.dp),
                             fontWeight = FontWeight.Bold
                         )
                     }
@@ -384,9 +413,12 @@ fun WebtoonDetailScreen(
             }
 
             if (!isInSelectionMode) {
-                PullToRefreshContainer(
-                    modifier = Modifier.align(Alignment.TopCenter),
+                PullToRefreshDefaults.Indicator(
                     state = pullToRefreshState,
+                    isRefreshing = isRefreshing,
+                    modifier = Modifier
+                        .align(Alignment.TopCenter)
+                        .padding(top = statusBarTop + TopBarHeight),
                 )
             }
         }
@@ -458,143 +490,117 @@ private fun ResumeReadingButton(
                 modifier = Modifier.widthIn(max = 220.dp),
             )
         },
-        modifier = Modifier.semantics { contentDescription = "$label $chapterLabel" },
+        modifier = Modifier
+            .padding(horizontal = if (expanded) 16.dp else 0.dp)
+            .semantics { contentDescription = "$label $chapterLabel" },
+        shape = RoundedCornerShape(28.dp),
+        containerColor = MaterialTheme.colorScheme.primary,
+        contentColor = MaterialTheme.colorScheme.onPrimary,
     )
 }
+
+/** Small top app bar height (M3); the header starts below it so the cover never sits under the bar. */
+private val TopBarHeight = 64.dp
 
 @Composable
 fun WebtoonHeader(
     webtoon: Webtoon?,
     sourceId: String,
-    isFavorite: Boolean,
+    webtoonId: String,
+    topInset: Dp,
     parallaxY: Float = 0f,
-    onToggleFavorite: () -> Unit,
 ) {
+    val context = LocalContext.current
     var showFullCover by remember { mutableStateOf(false) }
     val coverUrl = webtoon?.thumbnail.orEmpty()
     val coverHeaders = rememberSourceImageHeaders(sourceId = sourceId)
+    val sourceName = remember(sourceId) {
+        (context.applicationContext as? com.radiant.webtoon.WebtoonApplication)
+            ?.extensionManager
+            ?.getSource(sourceId)
+            ?.name
+    }
     Box(modifier = Modifier.fillMaxWidth().clipToBounds()) {
         RadiantAsyncImage(
             url = coverUrl,
             contentDescription = null,
             headers = coverHeaders,
             sourceId = sourceId,
+            widthDp = COVER_REQUEST_WIDTH,
+            heightDp = COVER_REQUEST_HEIGHT,
             scale = Scale.FILL,
             contentScale = ContentScale.Crop,
             modifier = Modifier
                 .matchParentSize()
                 .graphicsLayer { translationY = parallaxY }
-                .blur(24.dp)
-                .alpha(0.35f),
+                .blur(20.dp)
+                .alpha(0.45f),
         )
         Box(
             modifier = Modifier
                 .matchParentSize()
                 .background(
                     Brush.verticalGradient(
-                        colors = listOf(Color.Transparent, MaterialTheme.colorScheme.background),
-                        startY = 0f
+                        0f to MaterialTheme.colorScheme.background.copy(alpha = 0.2f),
+                        0.55f to MaterialTheme.colorScheme.background.copy(alpha = 0.75f),
+                        1f to MaterialTheme.colorScheme.background,
                     )
                 )
         )
         Row(
             modifier = Modifier
-                .padding(top = 88.dp, start = 16.dp, end = 16.dp, bottom = 16.dp)
+                .padding(top = topInset + 4.dp, start = 16.dp, end = 16.dp, bottom = 12.dp)
                 .fillMaxWidth(),
-            verticalAlignment = Alignment.Top,
+            verticalAlignment = Alignment.CenterVertically,
         ) {
-            RadiantAsyncImage(
-                url = coverUrl,
-                contentDescription = "Cover",
-                headers = coverHeaders,
-                sourceId = sourceId,
-                scale = Scale.FILL,
-                contentScale = ContentScale.Crop,
+            Box(
                 modifier = Modifier
-                    .width(110.dp)
-                    .height(160.dp)
+                    .width(112.dp)
+                    .aspectRatio(2f / 3f)
+                    .sharedCover(coverSharedKey(sourceId, webtoonId))
                     .shadow(8.dp, RoundedCornerShape(8.dp), clip = true)
-                    .clip(RoundedCornerShape(8.dp))
                     .clickable(enabled = coverUrl.isNotBlank()) { showFullCover = true },
-                error = { CoverErrorPlaceholder(Modifier.fillMaxSize()) },
-            )
+            ) {
+                RadiantAsyncImage(
+                    url = coverUrl,
+                    contentDescription = "Cover",
+                    headers = coverHeaders,
+                    sourceId = sourceId,
+                    widthDp = COVER_REQUEST_WIDTH,
+                    heightDp = COVER_REQUEST_HEIGHT,
+                    scale = Scale.FILL,
+                    contentScale = ContentScale.Crop,
+                    modifier = Modifier.fillMaxSize(),
+                    loading = { Box(Modifier.fillMaxSize().shimmerEffect()) },
+                    error = { CoverErrorPlaceholder(Modifier.fillMaxSize()) },
+                )
+            }
             Column(
                 modifier = Modifier
                     .padding(start = 16.dp)
                     .weight(1f),
+                verticalArrangement = Arrangement.spacedBy(6.dp),
             ) {
-            Text(
-                text = webtoon?.title ?: if (webtoon == null) "Loading..." else "Unknown title",
-                style = MaterialTheme.typography.titleLarge,
-                fontWeight = FontWeight.Bold,
-                maxLines = 2,
-                overflow = TextOverflow.Ellipsis
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = webtoon?.author?.takeIf { it.isNotBlank() } ?: "Unknown author",
-                style = MaterialTheme.typography.bodyMedium,
-                color = MaterialTheme.colorScheme.onSurfaceVariant
-            )
-            Spacer(modifier = Modifier.height(8.dp))
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                // Status Chip
-                val statusText = webtoon?.status ?: "Unknown"
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(4.dp))
-                        .background(MaterialTheme.colorScheme.secondaryContainer)
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
-                ) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(
-                            imageVector = Icons.Default.Schedule, 
-                            contentDescription = null, 
-                            modifier = Modifier.size(12.dp), 
-                            tint = MaterialTheme.colorScheme.onSecondaryContainer
-                        )
-                        Spacer(modifier = Modifier.width(4.dp))
-                        Text(
-                            text = statusText,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSecondaryContainer
-                        )
-                    }
-                }
-                
                 Text(
-                    text = "•",
-                    style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    text = webtoon?.title ?: "Loading…",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 3,
+                    overflow = TextOverflow.Ellipsis,
                 )
-                
-                Text(
-                    text = sourceId.uppercase(),
-                    style = MaterialTheme.typography.labelSmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                HeaderMetaLine(
+                    icon = Icons.Default.PersonOutline,
+                    text = webtoon?.author?.takeIf { it.isNotBlank() } ?: "Unknown author",
                 )
-            }
-            Spacer(modifier = Modifier.height(12.dp))
-            Button(
-                onClick = onToggleFavorite,
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = if (isFavorite) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.primary,
-                    contentColor = if (isFavorite) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onPrimary
+                HeaderMetaLine(
+                    icon = Icons.Default.Schedule,
+                    text = listOfNotNull(
+                        webtoon?.status?.takeIf { it.isNotBlank() } ?: "Unknown",
+                        sourceName ?: sourceId,
+                    ).joinToString(" • "),
                 )
-            ) {
-                Icon(
-                    if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
-                    contentDescription = null,
-                    modifier = Modifier.size(18.dp)
-                )
-                Text(if (isFavorite) " In library" else " Add to library", modifier = Modifier.padding(start = 8.dp))
             }
         }
-    }
     }
 
     if (showFullCover && coverUrl.isNotBlank()) {
@@ -692,38 +698,68 @@ private fun CoverViewerDialog(
 }
 
 @Composable
+private fun HeaderMetaLine(icon: androidx.compose.ui.graphics.vector.ImageVector, text: String) {
+    Row(verticalAlignment = Alignment.CenterVertically) {
+        Icon(
+            imageVector = icon,
+            contentDescription = null,
+            modifier = Modifier.size(16.dp),
+            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+        Spacer(modifier = Modifier.width(6.dp))
+        Text(
+            text = text,
+            style = MaterialTheme.typography.bodyMedium,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
+    }
+}
+
+/** Mihon-style compact action row: equal-width icon + label buttons. */
+@Composable
 fun WebtoonActions(
-    webtoonUrl: String,
+    isFavorite: Boolean,
+    onToggleFavorite: () -> Unit,
     onWebViewClick: () -> Unit,
     onTrackClick: () -> Unit,
     onDownloadClick: () -> Unit
 ) {
+    val inactive = MaterialTheme.colorScheme.onSurfaceVariant
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(horizontal = 16.dp),
-        horizontalArrangement = Arrangement.SpaceBetween
+            .padding(horizontal = 8.dp),
     ) {
-        // Tracking — coming soon
         ActionButton(
-            icon = Icons.Default.Bookmark,
-            label = "Tracking",
-            tint = Color.Gray,
-            onClick = onTrackClick
+            icon = if (isFavorite) Icons.Default.Favorite else Icons.Default.FavoriteBorder,
+            label = if (isFavorite) "In library" else "Add to library",
+            tint = if (isFavorite) MaterialTheme.colorScheme.primary else inactive,
+            emphasized = isFavorite,
+            onClick = onToggleFavorite,
+            modifier = Modifier.weight(1f),
         )
-        // WebView — wired
+        ActionButton(
+            icon = Icons.Default.Sync,
+            label = "Tracking",
+            tint = inactive,
+            onClick = onTrackClick,
+            modifier = Modifier.weight(1f),
+        )
         ActionButton(
             icon = Icons.Default.Public,
             label = "WebView",
-            tint = MaterialTheme.colorScheme.primary,
-            onClick = onWebViewClick
+            tint = inactive,
+            onClick = onWebViewClick,
+            modifier = Modifier.weight(1f),
         )
-        // Download — coming soon
         ActionButton(
             icon = Icons.Default.FileDownload,
             label = "Download",
-            tint = Color.Gray,
-            onClick = onDownloadClick
+            tint = inactive,
+            onClick = onDownloadClick,
+            modifier = Modifier.weight(1f),
         )
     }
 }
@@ -732,15 +768,45 @@ fun WebtoonActions(
 fun ActionButton(
     icon: androidx.compose.ui.graphics.vector.ImageVector,
     label: String,
+    modifier: Modifier = Modifier,
     tint: Color = MaterialTheme.colorScheme.primary,
+    emphasized: Boolean = false,
     onClick: () -> Unit
 ) {
+    val animatedTint by animateColorAsState(tint, animationSpec = tween(200), label = "actionTint")
+    val iconScale = remember { Animatable(1f) }
+    var wasEmphasized by remember { mutableStateOf(emphasized) }
+    LaunchedEffect(emphasized) {
+        if (emphasized && !wasEmphasized) {
+            iconScale.snapTo(0.7f)
+            iconScale.animateTo(1f, AppMotion.bouncy())
+        }
+        wasEmphasized = emphasized
+    }
     Column(
         horizontalAlignment = Alignment.CenterHorizontally,
-        modifier = Modifier.clickable(onClick = onClick)
+        modifier = modifier
+            .clip(RoundedCornerShape(12.dp))
+            .clickable(onClick = onClick)
+            .padding(vertical = 8.dp),
     ) {
-        Icon(icon, contentDescription = label, tint = tint)
-        Text(label, style = MaterialTheme.typography.bodySmall, color = tint)
+        Icon(
+            icon,
+            contentDescription = null,
+            tint = animatedTint,
+            modifier = Modifier.graphicsLayer {
+                scaleX = iconScale.value
+                scaleY = iconScale.value
+            },
+        )
+        Spacer(Modifier.height(4.dp))
+        Text(
+            label,
+            style = MaterialTheme.typography.labelMedium,
+            color = animatedTint,
+            maxLines = 1,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
 

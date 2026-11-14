@@ -1,6 +1,15 @@
 package com.radiant.webtoon.ui.components
 
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
@@ -42,9 +51,25 @@ fun Modifier.bounceClick(onClick: () -> Unit = {}): Modifier = composed {
         }
 }
 
-// Temporary fallback until com.valentinilk.shimmer is added
+/** Diagonal highlight sweep for image placeholders; only animates while it is composed. */
 fun Modifier.shimmerEffect(): Modifier = composed {
-    // In a full implementation, you would use a shimmer library or an infinitely animating brush.
-    // For now, this is a placeholder stub that would apply the blur/shimmer.
-    this
+    val base = MaterialTheme.colorScheme.surfaceContainerHigh
+    val highlight = MaterialTheme.colorScheme.surfaceContainerHighest
+    val progress by rememberInfiniteTransition(label = "shimmer").animateFloat(
+        initialValue = -1f,
+        targetValue = 2f,
+        animationSpec = infiniteRepeatable(tween(durationMillis = 1200, easing = LinearEasing)),
+        label = "shimmerProgress",
+    )
+    drawBehind {
+        val sweep = size.width + size.height
+        val start = sweep * progress - size.height
+        drawRect(
+            brush = Brush.linearGradient(
+                colors = listOf(base, highlight, base),
+                start = Offset(start, 0f),
+                end = Offset(start + size.height, size.height),
+            ),
+        )
+    }
 }

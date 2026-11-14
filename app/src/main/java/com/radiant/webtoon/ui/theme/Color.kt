@@ -2,19 +2,29 @@ package com.radiant.webtoon.ui.theme
 
 import androidx.compose.ui.graphics.Color
 
-// Glassmorphism Primary/Secondary
-val GlassPrimary = Color(0xFF8B5CF6) // Vibrant Violet
-val GlassSecondary = Color(0xFF06B6D4) // Cyan
-val GlassTertiary = Color(0xFFF43F5E) // Rose Red
+// Filament: night ink, paper type, one amber light.
+val FilamentInk = Color(0xFF07080C)
+val FilamentPanel = Color(0xFF14161C)
+val FilamentRaised = Color(0xFF1C1F28)
+val FilamentPaper = Color(0xFFF4EFE4)
+val FilamentMuted = Color(0xFFA39C90)
+val FilamentAmber = Color(0xFFF5B942)
+val FilamentOnAmber = Color(0xFF1A1203)
+val FilamentEmber = Color(0xFFFF5C38)
+val FilamentTeal = Color(0xFF7EE0C6)
+val FilamentAmberDeep = Color(0xFF8A5A00)
 
-// Dark Theme (Deep, translucent surfaces)
-val GlassDarkBackground = Color(0xFF0F111A)
-val GlassDarkSurface = Color(0x331E1E2E) // Translucent for blur
-val GlassDarkSurfaceVariant = Color(0x4D2A2A35)
-val GlassDarkOnBackground = Color(0xFFF8FAFC)
+// Names kept so older call sites follow the filament palette.
+val GlassPrimary = FilamentAmber
+val GlassSecondary = FilamentTeal
+val GlassTertiary = FilamentEmber
 
-// Light Theme (Clean, soft frosted glass look)
-val GlassLightBackground = Color(0xFFF8FAFC)
-val GlassLightSurface = Color(0x80FFFFFF)
-val GlassLightSurfaceVariant = Color(0x99F1F5F9)
-val GlassLightOnBackground = Color(0xFF0F172A)
+val GlassDarkBackground = FilamentInk
+val GlassDarkSurface = FilamentPanel
+val GlassDarkSurfaceVariant = FilamentRaised
+val GlassDarkOnBackground = FilamentPaper
+
+val GlassLightBackground = Color(0xFFF7F3EA)
+val GlassLightSurface = Color(0xFFFFFCF6)
+val GlassLightSurfaceVariant = Color(0xFFE7E0D2)
+val GlassLightOnBackground = FilamentInk

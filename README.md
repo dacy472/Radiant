@@ -31,7 +31,7 @@ Radiant does not host any comic content. It only reads from sources you choose a
 ### Option A — Install a release APK (easiest)
 
 1. Go to the [Releases](https://github.com/dacy472/Radiant/releases) page on GitHub.
-2. Download **Radiant-v0.1.1.apk** from the latest release.
+2. Download **Radiant-v0.1.2.apk** from the latest release.
 3. On your phone, open the file and allow installation from your browser or file manager if prompted.
 4. Open **Radiant** from your app drawer.
 

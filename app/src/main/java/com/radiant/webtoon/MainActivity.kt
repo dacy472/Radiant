@@ -13,21 +13,33 @@ import com.radiant.webtoon.core.lock.AppLockAuthenticator
 import com.radiant.webtoon.core.lock.AppLockPolicy
 import com.radiant.webtoon.core.lock.AppLockState
 import com.radiant.webtoon.core.receiver.ApkInstallReceiver
+import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.EnterTransition
 import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.ExperimentalSharedTransitionApi
+import androidx.compose.animation.SharedTransitionLayout
+import androidx.compose.animation.core.animateDpAsState
 import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.slideInVertically
+import androidx.compose.animation.slideOutVertically
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.consumeWindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.systemBarsPadding
+import com.radiant.webtoon.ui.components.LocalSharedTransitionScope
+import com.radiant.webtoon.ui.components.ProvideNavAnimatedScope
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.LibraryBooks
 import androidx.compose.material.icons.automirrored.filled.List
@@ -47,7 +59,9 @@ import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.semantics.disabled
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.Modifier
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
 import com.radiant.webtoon.ui.components.AppMotion
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -176,6 +190,9 @@ private fun DatabaseUpgradeErrorScreen(error: Throwable) {
     }
 }
 
+private fun isReaderHandoff(route: String?): Boolean = route?.startsWith("reader/") == true
+
+@OptIn(ExperimentalSharedTransitionApi::class, ExperimentalLayoutApi::class)
 @Composable
 fun WebtoonApp() {
     val context = androidx.compose.ui.platform.LocalContext.current
@@ -197,28 +214,33 @@ fun WebtoonApp() {
         Screen.Settings
     )
 
+    val showBottomBar = currentDestination?.route in items.map { it.route }
+
+    // Each destination owns its top bar and status-bar inset; the shell only reserves the
+    // bottom navigation bar, otherwise nested Scaffolds apply the status-bar inset twice.
     Scaffold(
+        contentWindowInsets = WindowInsets(0, 0, 0, 0),
         bottomBar = {
-            if (currentDestination?.route in items.map { it.route }) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    contentAlignment = androidx.compose.ui.Alignment.BottomCenter
-                ) {
+            AnimatedVisibility(
+                visible = showBottomBar,
+                enter = slideInVertically(AppMotion.spatial()) { it } + fadeIn(AppMotion.press()),
+                exit = slideOutVertically(AppMotion.spatial()) { it } + fadeOut(AppMotion.press()),
+            ) {
                     NavigationBar(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clip(androidx.compose.foundation.shape.RoundedCornerShape(24.dp)),
-                        containerColor = MaterialTheme.colorScheme.surface.copy(alpha = 0.8f),
-                        tonalElevation = 8.dp
+                        containerColor = MaterialTheme.colorScheme.surface,
+                        tonalElevation = 0.dp,
                     ) {
                         items.forEach { screen ->
                             val selected = currentDestination?.route == screen.route
                             val iconScale by animateFloatAsState(
                                 targetValue = if (selected) 1.08f else 1f,
-                                animationSpec = AppMotion.press(),
+                                animationSpec = AppMotion.bouncy(),
                                 label = "navIconScale",
+                            )
+                            val tickWidth by animateDpAsState(
+                                targetValue = if (selected) 16.dp else 0.dp,
+                                animationSpec = AppMotion.spatial(),
+                                label = "navTick",
                             )
                             NavigationBarItem(
                                 icon = {
@@ -227,29 +249,39 @@ fun WebtoonApp() {
                                         scaleY = iconScale
                                     }
                                     val showUpdateBadge = screen == Screen.Settings && availableExtensionUpdates.isNotEmpty()
-                                    if (showUpdateBadge) {
-                                        BadgedBox(
-                                            badge = {
-                                                Badge {
-                                                    Text(
-                                                        text = availableExtensionUpdates.size.toString(),
-                                                        style = MaterialTheme.typography.labelSmall,
-                                                    )
-                                                }
-                                            },
-                                        ) {
+                                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                        Box(
+                                            Modifier
+                                                .padding(bottom = 4.dp)
+                                                .height(3.dp)
+                                                .width(tickWidth)
+                                                .clip(RoundedCornerShape(2.dp))
+                                                .background(MaterialTheme.colorScheme.primary),
+                                        )
+                                        if (showUpdateBadge) {
+                                            BadgedBox(
+                                                badge = {
+                                                    Badge {
+                                                        Text(
+                                                            text = availableExtensionUpdates.size.toString(),
+                                                            style = MaterialTheme.typography.labelSmall,
+                                                        )
+                                                    }
+                                                },
+                                            ) {
+                                                Icon(
+                                                    screen.icon,
+                                                    contentDescription = screen.title,
+                                                    modifier = iconModifier,
+                                                )
+                                            }
+                                        } else {
                                             Icon(
                                                 screen.icon,
                                                 contentDescription = screen.title,
                                                 modifier = iconModifier,
                                             )
                                         }
-                                    } else {
-                                        Icon(
-                                            screen.icon,
-                                            contentDescription = screen.title,
-                                            modifier = iconModifier,
-                                        )
                                     }
                                 },
                                 label = { Text(screen.title, style = MaterialTheme.typography.labelSmall) },
@@ -257,8 +289,9 @@ fun WebtoonApp() {
                                 colors = NavigationBarItemDefaults.colors(
                                     selectedIconColor = MaterialTheme.colorScheme.primary,
                                     selectedTextColor = MaterialTheme.colorScheme.primary,
-                                    unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant, // Forces visible gray in light mode
-                                    unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant
+                                    indicatorColor = Color.Transparent,
+                                    unselectedIconColor = MaterialTheme.colorScheme.onSurfaceVariant,
+                                    unselectedTextColor = MaterialTheme.colorScheme.onSurfaceVariant,
                                 ),
                                 onClick = {
                                     navController.navigate(screen.route) {
@@ -270,20 +303,28 @@ fun WebtoonApp() {
                             )
                         }
                     }
-                }
             }
         }
     ) { innerPadding ->
+        SharedTransitionLayout {
+        CompositionLocalProvider(LocalSharedTransitionScope provides this) {
         NavHost(
             navController = navController,
             startDestination = Screen.Library.route,
-            modifier = Modifier.padding(innerPadding),
-            enterTransition = { EnterTransition.None },
-            exitTransition = { ExitTransition.None },
-            popEnterTransition = { EnterTransition.None },
-            popExitTransition = { ExitTransition.None },
+            modifier = Modifier
+                .padding(innerPadding)
+                .consumeWindowInsets(innerPadding),
+            enterTransition = { fadeIn(tween(220, delayMillis = 70)) },
+            exitTransition = {
+                if (isReaderHandoff(targetState.destination.route)) ExitTransition.None else fadeOut(tween(90))
+            },
+            popEnterTransition = {
+                if (isReaderHandoff(initialState.destination.route)) EnterTransition.None else fadeIn(tween(220, delayMillis = 70))
+            },
+            popExitTransition = { fadeOut(tween(90)) },
         ) {
             composable(Screen.Library.route) {
+                ProvideNavAnimatedScope(this) {
                 com.radiant.webtoon.ui.library.LibraryScreen(
                     repository = repository,
                     onWebtoonClick = { sourceId, webtoonId ->
@@ -294,12 +335,14 @@ fun WebtoonApp() {
                     },
                     onDownloadQueueClick = { navController.navigate("downloads_queue") },
                 )
+                }
             }
             composable(
                 route = "source/{sourceId}",
                 arguments = listOf(navArgument("sourceId") { type = NavType.StringType })
             ) { backStackEntry ->
                 val sourceId = decodeNav(backStackEntry.arguments?.getString("sourceId") ?: "")
+                ProvideNavAnimatedScope(this) {
                 com.radiant.webtoon.ui.source.SourceBrowseScreen(
                     extensionManager = extensionManager,
                     sourceId = sourceId,
@@ -311,9 +354,11 @@ fun WebtoonApp() {
                         navController.navigate("webview?url=${encodeNav(url)}&sourceId=${encodeNav(sourceId)}")
                     },
                 )
+                }
             }
 
             composable(Screen.Browse.route) {
+                ProvideNavAnimatedScope(this) {
                 com.radiant.webtoon.ui.browse.BrowseScreen(
                     extensionManager = extensionManager,
                     onWebtoonClick = { sourceId, webtoonId ->
@@ -336,6 +381,7 @@ fun WebtoonApp() {
                         navController.navigate("source_settings/${encodeNav(sourceId)}")
                     },
                 )
+                }
             }
 
             composable(
@@ -396,6 +442,7 @@ fun WebtoonApp() {
             }
 
             composable("global_search") {
+                ProvideNavAnimatedScope(this) {
                 com.radiant.webtoon.ui.search.SearchScreen(
                     repository = repository,
                     onWebtoonClick = { sourceId, webtoonId ->
@@ -408,6 +455,7 @@ fun WebtoonApp() {
                         navController.navigate("webview?url=${encodeNav(url)}&sourceId=${encodeNav(sourceId)}")
                     },
                 )
+                }
             }
 
             composable(
@@ -422,6 +470,7 @@ fun WebtoonApp() {
                 val migrateFromMangaId = backStackEntry.arguments?.getString("migrateFromMangaId")?.let { decodeNav(it) }
                 val migrateFromSourceId = backStackEntry.arguments?.getString("migrateFromSourceId")?.let { decodeNav(it) }
 
+                ProvideNavAnimatedScope(this) {
                 com.radiant.webtoon.ui.search.SearchScreen(
                     repository = repository,
                     onWebtoonClick = { sourceId, webtoonId ->
@@ -443,6 +492,7 @@ fun WebtoonApp() {
                         }
                     }
                 )
+                }
             }
             composable(
                 route = "detail/{sourceId}/{webtoonId}",
@@ -450,13 +500,18 @@ fun WebtoonApp() {
                     navArgument("sourceId") { type = NavType.StringType },
                     navArgument("webtoonId") { type = NavType.StringType }
                 ),
-                enterTransition = { fadeIn(animationSpec = AppMotion.press()) },
-                exitTransition = { ExitTransition.None },
-                popEnterTransition = { EnterTransition.None },
-                popExitTransition = { fadeOut(animationSpec = AppMotion.press()) },
+                enterTransition = { fadeIn(tween(300)) + slideInVertically(AppMotion.spatial()) { it / 12 } },
+                exitTransition = {
+                    if (isReaderHandoff(targetState.destination.route)) ExitTransition.None else fadeOut(tween(120))
+                },
+                popEnterTransition = {
+                    if (isReaderHandoff(initialState.destination.route)) EnterTransition.None else fadeIn(tween(220))
+                },
+                popExitTransition = { fadeOut(tween(200)) + slideOutVertically(AppMotion.spatial()) { it / 12 } },
             ) { backStackEntry ->
                 val sourceId = decodeNav(backStackEntry.arguments?.getString("sourceId") ?: "")
                 val webtoonId = decodeNav(backStackEntry.arguments?.getString("webtoonId") ?: "")
+                ProvideNavAnimatedScope(this) {
                 com.radiant.webtoon.ui.detail.WebtoonDetailScreen(
                     repository = repository,
                     sourceId = sourceId,
@@ -476,6 +531,7 @@ fun WebtoonApp() {
                         )
                     },
                 )
+                }
             }
             // Settings and Queue below
             composable(Screen.Settings.route) {
@@ -576,7 +632,10 @@ fun WebtoonApp() {
                     navArgument("webtoonId") { type = NavType.StringType },
                     navArgument("chapterId") { type = NavType.StringType },
                     navArgument("chapterTitle") { type = NavType.StringType; defaultValue = "" }
-                )
+                ),
+                enterTransition = { EnterTransition.None },
+                exitTransition = { ExitTransition.None },
+                popExitTransition = { ExitTransition.None },
             ) { backStackEntry ->
                 val sourceId = decodeNav(backStackEntry.arguments?.getString("sourceId") ?: "")
                 val webtoonId = decodeNav(backStackEntry.arguments?.getString("webtoonId") ?: "")
@@ -597,6 +656,8 @@ fun WebtoonApp() {
                     navController.popBackStack()
                 }
             }
+        }
+        }
         }
     }
 }

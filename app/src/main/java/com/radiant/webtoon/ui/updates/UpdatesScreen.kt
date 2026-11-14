@@ -9,7 +9,8 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Download
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.*
-import androidx.compose.material3.pulltorefresh.PullToRefreshContainer
+import androidx.compose.material3.pulltorefresh.PullToRefreshDefaults
+import androidx.compose.material3.pulltorefresh.pullToRefresh
 import androidx.compose.material3.pulltorefresh.rememberPullToRefreshState
 import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
@@ -21,6 +22,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import com.radiant.webtoon.ui.components.RadiantScreenTitle
 import com.radiant.webtoon.ui.components.CoverErrorPlaceholder
 import com.radiant.webtoon.ui.components.DownloadManagerIconButton
 import com.radiant.webtoon.ui.components.RadiantAsyncImage
@@ -50,27 +53,16 @@ fun UpdatesScreen(
     }
 
     val pullToRefreshState = rememberPullToRefreshState()
-
-    if (pullToRefreshState.isRefreshing) {
-        LaunchedEffect(true) {
-            viewModel.refreshManually()
-        }
-    }
-
-    LaunchedEffect(isRefreshing) {
-        if (isRefreshing) {
-            if (!pullToRefreshState.isRefreshing) pullToRefreshState.startRefresh()
-        } else {
-            pullToRefreshState.endRefresh()
-        }
-    }
+    val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
 
     val context = LocalContext.current
     val app = context.applicationContext as WebtoonApplication
     Scaffold(
+        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
             TopAppBar(
-                title = { Text("Updates") },
+                title = { RadiantScreenTitle("Updates") },
+                scrollBehavior = scrollBehavior,
                 actions = {
                     IconButton(onClick = { viewModel.refreshManually() }) {
                         Icon(Icons.Default.Refresh, contentDescription = "Refresh updates")
@@ -84,7 +76,11 @@ fun UpdatesScreen(
             modifier = Modifier
                 .fillMaxSize()
                 .padding(padding)
-                .nestedScroll(pullToRefreshState.nestedScrollConnection)
+                .pullToRefresh(
+                    isRefreshing = isRefreshing,
+                    state = pullToRefreshState,
+                    onRefresh = { viewModel.refreshManually() },
+                )
         ) {
             if (updates.isEmpty()) {
                 Box(
@@ -102,7 +98,7 @@ fun UpdatesScreen(
             } else {
                 LazyColumn(
                     modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = 80.dp),
+                    contentPadding = PaddingValues(bottom = 16.dp),
                 ) {
                     groupedUpdates.forEach { group ->
                         stickyHeader(key = "header-${group.dayStart}") {
@@ -141,9 +137,10 @@ fun UpdatesScreen(
                 }
             }
 
-            PullToRefreshContainer(
-                modifier = Modifier.align(Alignment.TopCenter),
+            PullToRefreshDefaults.Indicator(
                 state = pullToRefreshState,
+                isRefreshing = isRefreshing,
+                modifier = Modifier.align(Alignment.TopCenter),
             )
         }
     }
@@ -151,24 +148,13 @@ fun UpdatesScreen(
 
 @Composable
 private fun UpdateSectionHeader(label: String) {
-    Surface(
-        modifier = Modifier.fillMaxWidth(),
-        color = MaterialTheme.colorScheme.surface,
-        tonalElevation = 2.dp,
-    ) {
-        Column {
-            Text(
-                text = label,
-                style = MaterialTheme.typography.titleSmall,
-                fontWeight = FontWeight.SemiBold,
-                color = MaterialTheme.colorScheme.primary,
-                modifier = Modifier.padding(horizontal = 16.dp, vertical = 10.dp),
-            )
-            HorizontalDivider(
-                color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
-            )
-        }
-    }
+    Text(
+        text = label.uppercase(),
+        style = MaterialTheme.typography.labelSmall.copy(letterSpacing = 1.4.sp),
+        fontWeight = FontWeight.SemiBold,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(horizontal = 16.dp, vertical = 12.dp),
+    )
 }
 
 @Composable

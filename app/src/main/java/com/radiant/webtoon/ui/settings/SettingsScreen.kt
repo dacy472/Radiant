@@ -13,6 +13,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.unit.dp
 import com.radiant.webtoon.ui.components.DownloadManagerIconButton
 import com.radiant.webtoon.ui.components.bounceClick
@@ -34,10 +35,13 @@ fun SettingsScreen(
     onStatsClick: () -> Unit = {},
     onUpcomingClick: () -> Unit = {},
 ) {
+    val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
     Scaffold(
+        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
             TopAppBar(
-                title = { Text("Settings") },
+                title = { com.radiant.webtoon.ui.components.RadiantScreenTitle("Settings") },
+                scrollBehavior = scrollBehavior,
                 actions = {
                     DownloadManagerIconButton(onClick = onDownloadQueueClick)
                 },

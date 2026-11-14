@@ -29,6 +29,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.viewmodel.compose.viewModel
 import com.radiant.webtoon.core.source.ExtensionManager
 import com.radiant.webtoon.ui.components.WebtoonThumbnailCard
+import com.radiant.webtoon.ui.components.coverSharedKey
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
@@ -99,7 +100,7 @@ fun SourceBrowseScreen(
             )
         }
     ) { padding ->
-        Column(modifier = Modifier.padding(padding).fillMaxSize()) {
+        Column(modifier = Modifier.padding(top = padding.calculateTopPadding()).fillMaxSize()) {
             TabRow(selectedTabIndex = selectedTab.ordinal) {
                 Tab(
                     selected = selectedTab == BrowseTab.POPULAR,
@@ -242,21 +243,29 @@ fun SourceBrowseScreen(
                     }
                     else -> {
                         LazyVerticalGrid(
-                            columns = GridCells.Adaptive(120.dp),
+                            columns = GridCells.Adaptive(108.dp),
                             state = gridState,
                             modifier = Modifier.fillMaxSize(),
-                            contentPadding = PaddingValues(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(12.dp),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            contentPadding = PaddingValues(
+                                start = 8.dp,
+                                end = 8.dp,
+                                top = 8.dp,
+                                bottom = 8.dp + padding.calculateBottomPadding(),
+                            ),
+                            verticalArrangement = Arrangement.spacedBy(8.dp),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             itemsIndexed(
                                 webtoons.distinctBy { it.identityKey() },
                                 key = { index, item -> "${item.identityKey()}_$index" }
                             ) { _, webtoon ->
+                                val webtoonKey = webtoon.url ?: webtoon.id
                                 WebtoonThumbnailCard(
                                     webtoon = webtoon,
-                                    onClick = { onWebtoonClick(sourceId, webtoon.url ?: webtoon.id) },
-                                    sourceId = sourceId
+                                    onClick = { onWebtoonClick(sourceId, webtoonKey) },
+                                    sourceId = sourceId,
+                                    compact = true,
+                                    sharedKey = coverSharedKey(sourceId, webtoonKey),
                                 )
                             }
 

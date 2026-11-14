@@ -3,6 +3,7 @@ package com.radiant.webtoon.ui.components
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.MutableTransitionState
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
@@ -33,6 +34,12 @@ object AppMotion {
     fun <T> press() = tween<T>(durationMillis = PressMs, easing = FastOutSlowInEasing)
 
     fun <T> chrome() = tween<T>(durationMillis = ChromeMs, easing = FastOutSlowInEasing)
+
+    /** M3 Expressive "default spatial" spring: position and size, no visible overshoot. */
+    fun <T> spatial() = spring<T>(dampingRatio = 0.9f, stiffness = 700f)
+
+    /** M3 Expressive "fast spatial" spring with a small overshoot, for icons and selection pops. */
+    fun <T> bouncy() = spring<T>(dampingRatio = 0.6f, stiffness = 1400f)
 }
 
 /** Material-themed ripple touch feedback for list rows. */

@@ -1,5 +1,7 @@
 package com.radiant.webtoon.ui.browse
 
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
@@ -25,6 +27,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.input.nestedscroll.nestedScroll
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -61,12 +64,24 @@ fun BrowseScreen(
     var searchQuery by remember { mutableStateOf("") }
 
     val snackbarHostState = remember { SnackbarHostState() }
+    val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
+    val tabsColor by animateColorAsState(
+        targetValue = if (scrollBehavior.state.overlappedFraction > 0.01f) {
+            MaterialTheme.colorScheme.surfaceContainer
+        } else {
+            MaterialTheme.colorScheme.surface
+        },
+        animationSpec = tween(220),
+        label = "browseTabsColor",
+    )
 
     Scaffold(
+        modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         snackbarHost = { SnackbarHost(snackbarHostState) },
         topBar = {
             Column {
                 TopAppBar(
+                    scrollBehavior = scrollBehavior,
                     title = {
                         if (isSearching) {
                             TextField(
@@ -84,7 +99,7 @@ fun BrowseScreen(
                                 )
                             )
                         } else {
-                            Text("Browse")
+                            com.radiant.webtoon.ui.components.RadiantScreenTitle("Browse")
                         }
                     },
                     actions = {
@@ -147,7 +162,7 @@ fun BrowseScreen(
                         DownloadManagerIconButton(onClick = onDownloadQueueClick)
                     }
                 )
-                TabRow(selectedTabIndex = pagerState.currentPage) {
+                TabRow(selectedTabIndex = pagerState.currentPage, containerColor = tabsColor) {
                     tabs.forEachIndexed { index, title ->
                         Tab(
                             selected = pagerState.currentPage == index,

@@ -16,7 +16,6 @@ import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.ProgressBar
-import android.widget.SeekBar
 import android.widget.TextView
 import androidx.activity.OnBackPressedCallback
 import androidx.activity.enableEdgeToEdge
@@ -84,14 +83,8 @@ class ReaderActivity : AppCompatActivity(), ReaderViewerHost {
     private lateinit var statusMessage: TextView
     private lateinit var statusPrimary: Button
     private lateinit var statusSecondary: Button
-    private lateinit var menuRoot: LinearLayout
-    private lateinit var titleView: TextView
-    private lateinit var pageLabel: TextView
-    private lateinit var pageSeek: SeekBar
-    private lateinit var prevButton: Button
-    private lateinit var nextButton: Button
-    private lateinit var cropButton: Button
-    private lateinit var modeButton: Button
+    private lateinit var menuRoot: FrameLayout
+    private lateinit var pagePill: ComposeView
     private lateinit var settingsCompose: ComposeView
 
     private var viewer: Viewer? = null
@@ -99,7 +92,6 @@ class ReaderActivity : AppCompatActivity(), ReaderViewerHost {
     private var viewerCrop: Boolean? = null
     private var currentSettings = ViewerSettings()
     private var menuVisible = false
-    private var seeking = false
     private var awaitingChallenge = false
     private var boundToken: String? = null
     private var boundGeneration = -1L
@@ -189,12 +181,6 @@ class ReaderActivity : AppCompatActivity(), ReaderViewerHost {
         val generation = viewModel.loadGeneration.value
         // Continuous viewers persist through onReadPositionChanged (top page + in-page offset).
         viewModel.onPageSelected(page.index, generation, persist = viewer !is WebtoonViewer)
-        val count = viewModel.pages.value.size
-        if (!seeking && count > 0) {
-            pageSeek.max = (count - 1).coerceAtLeast(0)
-            pageSeek.progress = page.index.coerceIn(0, pageSeek.max)
-            pageLabel.text = "${page.number} / $count"
-        }
     }
 
     override fun onReadPositionChanged(page: ReaderPage, offsetPermyriad: Int) {
@@ -255,22 +241,6 @@ class ReaderActivity : AppCompatActivity(), ReaderViewerHost {
         lifecycleScope.launch {
             combine(viewModel.isLoading, viewModel.pageError, viewModel.pageListDebugMode) { _, _, _ -> Unit }
                 .collect { renderStatus() }
-        }
-        lifecycleScope.launch {
-            viewModel.activeChapterTitle.collect { titleView.text = it.ifBlank { "Chapter" } }
-        }
-        lifecycleScope.launch {
-            combine(viewModel.hasPreviousChapter, viewModel.hasNextChapter) { prev, next -> prev to next }
-                .collect { (prev, next) ->
-                    prevButton.isEnabled = prev
-                    nextButton.isEnabled = next
-                }
-        }
-        lifecycleScope.launch {
-            viewModel.cropBorders.collect { on -> cropButton.text = if (on) "Crop on" else "Crop off" }
-        }
-        lifecycleScope.launch {
-            viewModel.readingMode.collect { modeButton.text = it.label }
         }
         lifecycleScope.launch {
             viewModel.backgroundColor.collect { color ->
@@ -340,11 +310,6 @@ class ReaderActivity : AppCompatActivity(), ReaderViewerHost {
         )
         boundGeneration = bind.generation
         boundToken = token
-        pageSeek.max = bind.pages.lastIndex.coerceAtLeast(0)
-        if (!seeking) {
-            pageSeek.progress = resume
-            pageLabel.text = "${resume + 1} / ${bind.pages.size}"
-        }
     }
 
     private fun renderStatus() {
@@ -448,6 +413,9 @@ class ReaderActivity : AppCompatActivity(), ReaderViewerHost {
     private fun setMenuVisible(visible: Boolean) {
         menuVisible = visible
         menuRoot.visibility = if (visible) View.VISIBLE else View.GONE
+        if (::pagePill.isInitialized) {
+            pagePill.visibility = if (visible) View.GONE else View.VISIBLE
+        }
         if (::viewModel.isInitialized) viewModel.setMenuVisible(visible)
         val controller = WindowCompat.getInsetsController(window, viewerContainer)
         if (visible) {
@@ -476,6 +444,7 @@ class ReaderActivity : AppCompatActivity(), ReaderViewerHost {
         viewerContainer = FrameLayout(this).apply { setBackgroundColor(Color.BLACK) }
         statusOverlay = statusOverlay()
         menuRoot = menuOverlay()
+        pagePill = createPagePill()
         settingsCompose = ComposeView(this).apply {
             visibility = View.GONE
             setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
@@ -493,6 +462,9 @@ class ReaderActivity : AppCompatActivity(), ReaderViewerHost {
         }
         root.addView(viewerContainer, MATCH_PARENT, MATCH_PARENT)
         root.addView(statusOverlay, MATCH_PARENT, MATCH_PARENT)
+        root.addView(pagePill, FrameLayout.LayoutParams(WRAP_CONTENT, WRAP_CONTENT, Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL).apply {
+            bottomMargin = dp(28)
+        })
         root.addView(menuRoot, MATCH_PARENT, MATCH_PARENT)
         root.addView(settingsCompose, MATCH_PARENT, MATCH_PARENT)
         setContentView(root)
@@ -525,91 +497,66 @@ class ReaderActivity : AppCompatActivity(), ReaderViewerHost {
         }
     }
 
-    private fun menuOverlay(): LinearLayout {
-        titleView = TextView(this).apply {
-            setTextColor(Color.WHITE)
-            textSize = 16f
-            maxLines = 2
-        }
-        val back = textButton("Back") { finish() }
-        val settings = textButton("Settings") {
-            showSettings.value = true
-            settingsCompose.visibility = View.VISIBLE
-        }
-        val top = horizontalBar().apply {
-            addView(back)
-            addView(titleView, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-            addView(settings)
-        }
-
-        pageLabel = TextView(this).apply {
-            setTextColor(Color.WHITE)
-            gravity = Gravity.CENTER
-            text = "1 / 1"
-        }
-        pageSeek = SeekBar(this).apply {
-            max = 0
-            setOnSeekBarChangeListener(
-                object : SeekBar.OnSeekBarChangeListener {
-                    override fun onProgressChanged(seekBar: SeekBar?, progress: Int, fromUser: Boolean) {
-                        if (!fromUser) return
-                        val url = viewModel.pages.value.getOrNull(progress) ?: return
-                        viewer?.moveToPage(ReaderPage(progress, url, viewModel.currentChapterId))
-                    }
-
-                    override fun onStartTrackingTouch(seekBar: SeekBar?) {
-                        seeking = true
-                    }
-
-                    override fun onStopTrackingTouch(seekBar: SeekBar?) {
-                        seeking = false
-                    }
+    private fun menuOverlay(): FrameLayout {
+        val top = readerCompose {
+            val title by viewModel.activeChapterTitle.collectAsStateWithLifecycle()
+            ReaderChromeTop(
+                title = title,
+                onBack = { finish() },
+                onSettings = {
+                    showSettings.value = true
+                    settingsCompose.visibility = View.VISIBLE
                 },
             )
         }
-        prevButton = textButton("Previous") { viewModel.loadPreviousChapter() }
-        nextButton = textButton("Next") { viewModel.loadNextChapter() }
-        cropButton = textButton("Crop off") { viewModel.setCropBorders(!viewModel.cropBorders.value) }
-        modeButton = textButton("Webtoon") { viewModel.setReadingMode(viewModel.readingMode.value.next()) }
-        val actions = horizontalBar().apply {
-            addView(prevButton, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-            addView(cropButton, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-            addView(modeButton, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
-            addView(nextButton, LinearLayout.LayoutParams(0, WRAP_CONTENT, 1f))
+        val dock = readerCompose {
+            val pageIndex by viewModel.currentPageIndex.collectAsStateWithLifecycle()
+            val pages by viewModel.pages.collectAsStateWithLifecycle()
+            val crop by viewModel.cropBorders.collectAsStateWithLifecycle()
+            val mode by viewModel.readingMode.collectAsStateWithLifecycle()
+            val hasPrevious by viewModel.hasPreviousChapter.collectAsStateWithLifecycle()
+            val hasNext by viewModel.hasNextChapter.collectAsStateWithLifecycle()
+            ReaderChromeDock(
+                pageIndex = pageIndex,
+                pageCount = pages.size,
+                cropBorders = crop,
+                readingMode = mode,
+                hasPrevious = hasPrevious,
+                hasNext = hasNext,
+                onSeek = { index -> seekToPage(index) },
+                onSeekFinished = {},
+                onPrevious = { viewModel.loadPreviousChapter() },
+                onNext = { viewModel.loadNextChapter() },
+                onToggleCrop = { viewModel.setCropBorders(!viewModel.cropBorders.value) },
+                onCycleMode = { viewModel.setReadingMode(viewModel.readingMode.value.next()) },
+            )
         }
-        val bottom = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(0xCC000000.toInt())
-            val pad = dp(8)
-            setPadding(pad, pad, pad, dp(16))
-            addView(pageLabel, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-            addView(pageSeek, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-            addView(actions, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-        }
-
-        return LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            fitsSystemWindows = true
+        return FrameLayout(this).apply {
             isClickable = false
             visibility = View.GONE
-            addView(top, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
-            addView(View(context), LinearLayout.LayoutParams(MATCH_PARENT, 0, 1f))
-            addView(bottom, LinearLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT))
+            addView(top, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.TOP))
+            addView(dock, FrameLayout.LayoutParams(MATCH_PARENT, WRAP_CONTENT, Gravity.BOTTOM))
         }
     }
 
-    private fun horizontalBar(): LinearLayout = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
-        setBackgroundColor(0xCC000000.toInt())
-        setPadding(dp(4), dp(4), dp(4), dp(4))
+    private fun createPagePill(): ComposeView = readerCompose {
+        val pageIndex by viewModel.currentPageIndex.collectAsStateWithLifecycle()
+        val pages by viewModel.pages.collectAsStateWithLifecycle()
+        ReaderPagePill(pageNumber = pageIndex + 1, pageCount = pages.size)
     }
 
-    private fun textButton(label: String, onClick: () -> Unit): Button =
-        Button(this).apply {
-            text = label
-            isAllCaps = false
-            setOnClickListener { onClick() }
+    private fun seekToPage(index: Int) {
+        val url = viewModel.pages.value.getOrNull(index) ?: return
+        viewer?.moveToPage(ReaderPage(index, url, viewModel.currentChapterId))
+    }
+
+    private fun readerCompose(content: @androidx.compose.runtime.Composable () -> Unit): ComposeView =
+        ComposeView(this).apply {
+            setViewCompositionStrategy(ViewCompositionStrategy.DisposeOnViewTreeLifecycleDestroyed)
+            setContent {
+                val themeMode by app.settingsManager.themeMode.collectAsStateWithLifecycle(initialValue = "system")
+                WebtoonTheme(themeMode = themeMode) { content() }
+            }
         }
 
     private fun dp(value: Int): Int = (value * resources.displayMetrics.density + 0.5f).toInt()

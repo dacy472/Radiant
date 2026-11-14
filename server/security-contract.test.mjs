@@ -50,6 +50,112 @@ const forbiddenMethod = await request(server, {
 });
 assert.equal(forbiddenMethod.status, 400);
 
+const token = 'test-token';
+const available = await request(server, { method: 'GET', path: '/extensions/available' });
+assert.equal(available.status, 200);
+assert.equal(typeof JSON.parse(available.body).available, 'object');
+
+const repo = await request(server, { method: 'GET', path: '/extensions/repo' });
+assert.equal(repo.status, 200);
+assert.deepEqual(JSON.parse(repo.body).extensions, []);
+
+const installedLocked = await request(server, { method: 'GET', path: '/extensions' });
+assert.equal(installedLocked.status, 401);
+const installed = await request(server, { method: 'GET', path: '/extensions', token });
+assert.equal(installed.status, 200);
+assert.ok(Array.isArray(JSON.parse(installed.body)));
+
+const refreshLocked = await request(server, { method: 'POST', path: '/extensions/repo/refresh', body: {} });
+assert.equal(refreshLocked.status, 401);
+const refreshMissing = await request(server, {
+  method: 'POST',
+  path: '/extensions/repo/refresh',
+  token,
+  body: {},
+});
+assert.equal(refreshMissing.status, 400);
+
+const installMissing = await request(server, {
+  method: 'POST',
+  path: '/extensions/install',
+  token,
+  body: {},
+});
+assert.equal(installMissing.status, 400);
+const installUnknown = await request(server, {
+  method: 'POST',
+  path: '/extensions/install',
+  token,
+  body: { id: 'en.does-not-exist' },
+});
+assert.equal(installUnknown.status, 500);
+
+const runMissing = await request(server, {
+  method: 'POST',
+  path: '/extensions/en.mock/run',
+  token,
+  body: { method: 'getPopularWebtoons', args: [] },
+});
+assert.equal(runMissing.status, 404);
+const runBadArgs = await request(server, {
+  method: 'POST',
+  path: '/extensions/en.mock/run',
+  token,
+  body: { method: 'getPopularWebtoons', args: 'nope' },
+});
+assert.equal(runBadArgs.status, 400);
+
+const removed = await request(server, { method: 'DELETE', path: '/extensions/en.mock', token });
+assert.equal(removed.status, 200);
+
+const libraryLocked = await request(server, { method: 'GET', path: '/library' });
+assert.equal(libraryLocked.status, 401);
+const libraryEmpty = await request(server, { method: 'GET', path: '/library', token });
+assert.equal(libraryEmpty.status, 200);
+assert.deepEqual(JSON.parse(libraryEmpty.body), []);
+
+const libraryBad = await request(server, { method: 'POST', path: '/library', token, body: {} });
+assert.equal(libraryBad.status, 400);
+const libraryAdd = await request(server, {
+  method: 'POST',
+  path: '/library',
+  token,
+  body: { sourceId: 'en.mock', webtoonId: 'series-1' },
+});
+assert.equal(libraryAdd.status, 200);
+const libraryAfter = JSON.parse((await request(server, { method: 'GET', path: '/library', token })).body);
+assert.equal(libraryAfter.length, 1);
+
+const libraryDelete = await request(server, {
+  method: 'DELETE',
+  path: '/library/en.mock/series-1',
+  token,
+});
+assert.equal(libraryDelete.status, 200);
+
+const syncBad = await request(server, { method: 'POST', path: '/library/sync', token, body: { nope: true } });
+assert.equal(syncBad.status, 400);
+const syncOk = await request(server, {
+  method: 'POST',
+  path: '/library/sync',
+  token,
+  body: [{ id: 'series-2', sourceId: 'en.mock' }],
+});
+assert.equal(syncOk.status, 200);
+
+const settingsBad = await request(server, { method: 'PATCH', path: '/settings', token, body: ['nope'] });
+assert.equal(settingsBad.status, 400);
+const settingsOk = await request(server, {
+  method: 'PATCH',
+  path: '/settings',
+  token,
+  body: { repoUrl: '' },
+});
+assert.equal(settingsOk.status, 200);
+
+const wrongToken = await request(server, { method: 'GET', path: '/library', token: 'wrong' });
+assert.equal(wrongToken.status, 401);
+
 server.close();
 
 const { assertTrustedArtifact, HOST_FS_MARKER } = await import('./artifact-trust.mjs');
