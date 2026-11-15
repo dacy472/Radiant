@@ -16,7 +16,7 @@ class UserAgentInterceptorTest {
     }
 
     @Test
-    fun overwritesExtensionUserAgentToMatchWebView() {
+    fun keepsExtensionUserAgentSoClearanceStaysBound() {
         val interceptor = UserAgentInterceptor("WebView-UA/1.0")
         val captured = capture(
             interceptor,
@@ -25,7 +25,7 @@ class UserAgentInterceptorTest {
                 .header("User-Agent", "CustomExt/1.0")
                 .build(),
         )
-        assertEquals("WebView-UA/1.0", captured.header("User-Agent"))
+        assertEquals("CustomExt/1.0", captured.header("User-Agent"))
     }
 
     @Test

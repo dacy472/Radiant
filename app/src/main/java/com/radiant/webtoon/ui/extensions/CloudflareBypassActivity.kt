@@ -9,7 +9,6 @@ import android.os.Looper
 import android.view.WindowManager
 import android.webkit.CookieManager
 import android.webkit.WebChromeClient
-import android.webkit.WebSettings
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -34,6 +33,8 @@ import com.radiant.webtoon.ui.theme.WebtoonTheme
 import com.radiant.webtoon.ui.webview.WebViewUrlNormalizer
 import eu.kanade.tachiyomi.network.NetworkHelper
 import eu.kanade.tachiyomi.network.WebViewResourceFetcher
+import eu.kanade.tachiyomi.network.setDefaultSettings
+import eu.kanade.tachiyomi.network.setUserAgent
 import eu.kanade.tachiyomi.network.interceptor.CloudflareBypassGate
 import eu.kanade.tachiyomi.network.interceptor.CloudflareChallengeDetector
 import eu.kanade.tachiyomi.network.interceptor.CloudflareInterceptor
@@ -143,15 +144,8 @@ class CloudflareBypassActivity : ComponentActivity() {
                         android.view.ViewGroup.LayoutParams.MATCH_PARENT,
                         android.view.ViewGroup.LayoutParams.MATCH_PARENT,
                     )
-                    settings.apply {
-                        javaScriptEnabled = true
-                        domStorageEnabled = true
-                        databaseEnabled = true
-                        useWideViewPort = true
-                        loadWithOverviewMode = true
-                        cacheMode = WebSettings.LOAD_DEFAULT
-                        userAgentString = userAgent
-                    }
+                    setDefaultSettings()
+                    setUserAgent(userAgent)
                     webViewClient = object : WebViewClient() {
                         override fun shouldInterceptRequest(
                             view: WebView,

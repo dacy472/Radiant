@@ -5,6 +5,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.Extension
 import androidx.compose.material.icons.filled.Search
 import androidx.compose.material3.*
@@ -26,6 +27,7 @@ fun SearchScreen(
     repository: com.radiant.webtoon.core.repository.WebtoonRepository,
     onWebtoonClick: (String, String) -> Unit, // sourceId, webtoonId
     onBrowseClick: (String) -> Unit, // sourceId
+    onBackClick: () -> Unit,
     onWebViewClick: (String, String) -> Unit = { _, _ -> }, // sourceId, url
     initialQuery: String? = null,
     migrateFromMangaId: String? = null,
@@ -131,7 +133,12 @@ fun SearchScreen(
                         ),
                         singleLine = true
                     )
-                }
+                },
+                navigationIcon = {
+                    IconButton(onClick = onBackClick) {
+                        Icon(Icons.AutoMirrored.Filled.ArrowBack, contentDescription = "Back")
+                    }
+                },
             )
         }
     ) { paddingValues ->

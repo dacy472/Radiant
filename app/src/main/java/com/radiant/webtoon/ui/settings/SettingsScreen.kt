@@ -40,7 +40,7 @@ fun SettingsScreen(
         modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
             TopAppBar(
-                title = { com.radiant.webtoon.ui.components.RadiantScreenTitle("Settings") },
+                title = { Text("Settings") },
                 scrollBehavior = scrollBehavior,
                 actions = {
                     DownloadManagerIconButton(onClick = onDownloadQueueClick)

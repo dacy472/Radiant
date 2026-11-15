@@ -52,10 +52,13 @@ object ExtensionCompatModule {
 
             Injekt.addSingletonFactory<PreferenceStore> { AndroidPreferenceStore(application) }
 
-            val database = (application as com.radiant.webtoon.WebtoonApplication).database
-            Injekt.addSingletonFactory<MangaDao> { database.mangaDao() }
-            Injekt.addSingletonFactory<ChapterDao> { database.chapterDao() }
-            Injekt.addSingletonFactory<HistoryDao> { database.historyDao() }
+            // Do not open Room here. Application.onCreate is the main thread, and an upgrade
+            // migration (chapter table rewrite) must not ANR or kill the process before
+            // MainActivity can show a recoverable database error.
+            val webtoonApp = application as com.radiant.webtoon.WebtoonApplication
+            Injekt.addSingletonFactory<MangaDao> { webtoonApp.database.mangaDao() }
+            Injekt.addSingletonFactory<ChapterDao> { webtoonApp.database.chapterDao() }
+            Injekt.addSingletonFactory<HistoryDao> { webtoonApp.database.historyDao() }
 
             Injekt.addSingletonFactory {
                 Json {

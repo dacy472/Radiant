@@ -9,7 +9,8 @@ import androidx.sqlite.db.SupportSQLiteDatabase
  * Recovered from git history of `WebtoonDatabase.kt` (not invented):
  * - v9 (`6450fed`): library/chapters/history/downloads/extensions/categories
  * - v10 (`68b5435`): added `tracks`
- * - v13 (`c02f686`): added `upcoming_releases` and `downloaded_chapters`
+ * - v13 (`c02f686`): added `upcoming_releases`, `downloaded_chapters`, and
+ *   `installed_extensions.versionCode` (the column was missing on v9/v10)
  * - v11 and v12 never appeared in this file (destructive fallback skipped them)
  *
  * v9 and v10 CREATE TABLE SQL is reconstructed from the entity classes that
@@ -25,7 +26,17 @@ object DatabaseMigrations {
     const val CURRENT_VERSION = VERSION_PAGE_OFFSET
 
     val MIGRATION_9_10 = sqlMigration(9, 10, CREATE_TRACKS)
-    val MIGRATION_10_13 = sqlMigration(10, 13, CREATE_UPCOMING_RELEASES, CREATE_DOWNLOADED_CHAPTERS)
+    val MIGRATION_10_13 = object : Migration(10, 13) {
+        override fun migrate(db: SupportSQLiteDatabase) {
+            val exec = SupportSqliteExecutor(db)
+            exec.exec(CREATE_UPCOMING_RELEASES.trimIndent())
+            exec.exec(CREATE_DOWNLOADED_CHAPTERS.trimIndent())
+            // v10 shipped installed_extensions without versionCode. v13 added the column
+            // under fallbackToDestructiveMigration, so a non-destructive jump must add it
+            // or Room refuses to open the database.
+            migrateInstalledExtensionsAddVersionCode(exec)
+        }
+    }
     val MIGRATION_13_14 = object : Migration(13, 14) {
         override fun migrate(db: SupportSQLiteDatabase) {
             migrateChaptersToSourceAwarePk(SupportSqliteExecutor(db))
@@ -175,18 +186,48 @@ object DatabaseMigrations {
         )
         db.exec(
             """
-            INSERT INTO `chapters_new` (
+            INSERT OR IGNORE INTO `chapters_new` (
                 `url`, `manga_id`, `name`, `scanlator`, `read`, `bookmark`,
                 `last_page_read`, `date_fetch`, `date_upload`, `chapter_number`, `source`
             )
             SELECT `url`, `manga_id`, `name`, `scanlator`, `read`, `bookmark`,
                 `last_page_read`, `date_fetch`, `date_upload`, `chapter_number`, `source`
             FROM `chapters`
+            ORDER BY `read` DESC, `bookmark` DESC, `last_page_read` DESC, `date_fetch` DESC
             """.trimIndent(),
         )
         db.exec("DROP TABLE `chapters`")
         db.exec("ALTER TABLE `chapters_new` RENAME TO `chapters`")
         db.exec("CREATE INDEX IF NOT EXISTS `index_chapters_manga_id_source` ON `chapters` (`manga_id`, `source`)")
+    }
+
+    /**
+     * v9/v10 `installed_extensions` has no `versionCode`. The rebuilt table matches the v13+
+     * entity: NOT NULL, no SQL default (Room does not declare one). Existing rows get 0.
+     */
+    fun migrateInstalledExtensionsAddVersionCode(db: SqlExecutor) {
+        db.exec(
+            """
+            CREATE TABLE IF NOT EXISTS `installed_extensions_new` (
+                `id` TEXT NOT NULL,
+                `name` TEXT NOT NULL,
+                `isTrusted` INTEGER NOT NULL,
+                `dateInstalled` INTEGER NOT NULL,
+                `versionCode` INTEGER NOT NULL,
+                PRIMARY KEY(`id`)
+            )
+            """.trimIndent(),
+        )
+        db.exec(
+            """
+            INSERT INTO `installed_extensions_new` (
+                `id`, `name`, `isTrusted`, `dateInstalled`, `versionCode`
+            )
+            SELECT `id`, `name`, `isTrusted`, `dateInstalled`, 0 FROM `installed_extensions`
+            """.trimIndent(),
+        )
+        db.exec("DROP TABLE `installed_extensions`")
+        db.exec("ALTER TABLE `installed_extensions_new` RENAME TO `installed_extensions`")
     }
 
     fun migrateHistoryToSourceAwarePk(db: SqlExecutor) {
@@ -213,6 +254,7 @@ object DatabaseMigrations {
             SELECT `chapter_id`, `webtoon_id`, `source_id`, `chapter_title`,
                 `webtoon_title`, `webtoon_thumbnail`, `read_at`
             FROM `history`
+            ORDER BY `read_at` DESC
             """.trimIndent(),
         )
         db.exec("DROP TABLE `history`")

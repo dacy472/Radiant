@@ -23,7 +23,6 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.radiant.webtoon.ui.components.RadiantScreenTitle
 import com.radiant.webtoon.ui.components.CoverErrorPlaceholder
 import com.radiant.webtoon.ui.components.DownloadManagerIconButton
 import com.radiant.webtoon.ui.components.RadiantAsyncImage
@@ -61,7 +60,7 @@ fun UpdatesScreen(
         modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
             TopAppBar(
-                title = { RadiantScreenTitle("Updates") },
+                title = { Text("Updates") },
                 scrollBehavior = scrollBehavior,
                 actions = {
                     IconButton(onClick = { viewModel.refreshManually() }) {

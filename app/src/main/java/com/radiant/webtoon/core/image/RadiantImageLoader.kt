@@ -14,6 +14,8 @@ object RadiantImageLoader {
     const val MEMORY_CACHE_MAX_SIZE_PERCENT = 0.10
     const val DISK_CACHE_MAX_SIZE_BYTES = 256L * 1024 * 1024
 
+    fun diskCacheDir(context: Context) = context.cacheDir.resolve("image_cache")
+
     fun build(
         context: Context,
         okHttpClient: OkHttpClient,
@@ -32,7 +34,7 @@ object RadiantImageLoader {
             }
             .diskCache {
                 DiskCache.Builder()
-                    .directory(context.cacheDir.resolve("image_cache"))
+                    .directory(diskCacheDir(context))
                     .maxSizeBytes(DISK_CACHE_MAX_SIZE_BYTES)
                     .build()
             }

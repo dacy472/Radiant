@@ -13,6 +13,7 @@ import com.radiant.webtoon.core.database.InstalledExtensionDao
 import com.radiant.webtoon.core.database.InstalledExtensionEntity
 import com.radiant.webtoon.core.model.Extension
 import com.radiant.webtoon.core.settings.SettingsManager
+import com.radiant.webtoon.core.settings.StoredPreferenceValues
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
 import kotlinx.coroutines.awaitAll
@@ -353,7 +354,7 @@ class ExtensionManager(
         prepareForUpdateCheck()
         refreshRemoteCatalogFromRepos(repoUrl)
         val prefs = context.getSharedPreferences("extension_cache", Context.MODE_PRIVATE)
-        val libraryRefreshDue = prefs.getInt(LIBRARY_REFRESH_PREF, 0) < LIBRARY_REFRESH_VERSION
+        val libraryRefreshDue = storedInt(prefs, LIBRARY_REFRESH_PREF, 0) < LIBRARY_REFRESH_VERSION
         val autoUpdate = settingsManager.autoUpdateExtensions.first()
         if (libraryRefreshDue) {
             refreshExtensionLibrary(repoUrl)
@@ -395,7 +396,7 @@ class ExtensionManager(
     suspend fun repairKnownBrokenExtensions() = withContext(Dispatchers.IO) {
         val prefs = context.getSharedPreferences("extension_cache", Context.MODE_PRIVATE)
         val flameInstalled = _installedExtensionInfos.value.find { it.packageName == FLAMECOMICS_PACKAGE }
-        val needsOneTimeRepair = !prefs.getBoolean(FLAMECOMICS_REPAIR_PREF, false)
+        val needsOneTimeRepair = !storedBoolean(prefs, FLAMECOMICS_REPAIR_PREF, false)
         // Keiyoushi restarted versionCode with the lib-1.6 rewrite, so gate on the lib, not the code.
         val belowMinimum = flameInstalled != null &&
             isNewerExtensionLib(FLAMECOMICS_MIN_EXTENSION_LIB, flameInstalled.extensionLibVersion)
@@ -666,7 +667,7 @@ class ExtensionManager(
 
     private suspend fun installDefaultExtensionsIfFirstLaunch(entries: List<RepoExtensionEntry>) {
         val prefs = context.getSharedPreferences("extension_cache", Context.MODE_PRIVATE)
-        if (prefs.getBoolean("first_launch_defaults_installed", false)) return
+        if (storedBoolean(prefs, "first_launch_defaults_installed", false)) return
 
         val curated = entries
             .filter { ExtensionAllowlist.isAllowedRepoEntry(it) && isPackageAllowed(it.id) }
@@ -1232,7 +1233,21 @@ class ExtensionManager(
     }
 
     private fun migrateExtensionCacheIfNeeded(prefs: android.content.SharedPreferences) {
-        val version = prefs.getInt("cache_version", 1)
+        val stored = try {
+            prefs.all
+        } catch (e: ClassCastException) {
+            Log.w(tag, "Unreadable extension cache prefs; leaving installed APKs in place", e)
+            return
+        }
+        val raw = stored["cache_version"]
+        val version = if (!stored.containsKey("cache_version")) {
+            1
+        } else {
+            StoredPreferenceValues.asInt(raw, EXTENSION_CACHE_VERSION)
+        }
+        if (raw != null && raw !is Int) {
+            prefs.edit().putInt("cache_version", version).apply()
+        }
         if (version >= EXTENSION_CACHE_VERSION) return
         prefs.edit()
             .remove("cached_extensions")
@@ -1390,11 +1405,50 @@ class ExtensionManager(
      *
      * @return number of packages upserted into the database
      */
+    private fun storedInt(
+        prefs: android.content.SharedPreferences,
+        key: String,
+        default: Int,
+    ): Int {
+        return try {
+            val stored = prefs.all
+            val value = StoredPreferenceValues.asInt(stored[key], default)
+            if (stored.containsKey(key) && stored[key] !is Int) {
+                prefs.edit().putInt(key, value).apply()
+            }
+            value
+        } catch (e: ClassCastException) {
+            Log.w(tag, "Unreadable pref $key", e)
+            prefs.edit().remove(key).apply()
+            default
+        }
+    }
+
+    private fun storedBoolean(
+        prefs: android.content.SharedPreferences,
+        key: String,
+        default: Boolean,
+    ): Boolean {
+        return try {
+            val stored = prefs.all
+            val raw = stored[key]
+            val value = StoredPreferenceValues.asBoolean(raw) ?: default
+            if (stored.containsKey(key) && raw !is Boolean) {
+                prefs.edit().putBoolean(key, value).apply()
+            }
+            value
+        } catch (e: ClassCastException) {
+            Log.w(tag, "Unreadable pref $key", e)
+            prefs.edit().remove(key).apply()
+            default
+        }
+    }
+
     suspend fun syncSystemInstalledExtensions(): Int = withContext(Dispatchers.IO) {
         val discovered = extensionLoader.discoverSystemExtensionPackages()
-        val localPackages = extensionLoader.scanLocalExtensions()
-            .map { it.packageName }
-            .toSet()
+        val localSnapshot = extensionLoader.snapshotLocalApks()
+        val localInfos = extensionLoader.scanLocalExtensions()
+        val localPackages = localInfos.map { it.packageName }.toSet()
         val discoveredPackages = discovered.map { it.packageName }.toSet()
         val untrusted = mutableListOf<Extension.Untrusted>()
 
@@ -1443,13 +1497,39 @@ class ExtensionManager(
 
         _untrustedExtensions.value = untrusted
 
-        // Remove DB rows for uninstalled system packages that have no local APK
+        for (info in localInfos) {
+            if (info.packageName in discoveredPackages) continue
+            if (!isPackageAllowed(info.packageName)) continue
+            val existing = installedDao.getById(info.packageName)
+            val trusted = existing?.isTrusted == true ||
+                runCatching { extensionLoader.isApkTrustedForExecution(info) }.getOrDefault(false)
+            installedDao.insert(
+                InstalledExtensionEntity(
+                    id = info.packageName,
+                    name = info.name.ifBlank { existing?.name ?: info.packageName },
+                    isTrusted = trusted,
+                    dateInstalled = existing?.dateInstalled ?: System.currentTimeMillis(),
+                    versionCode = info.versionCode.takeIf { it > 0L } ?: existing?.versionCode ?: 0L,
+                ),
+            )
+            upserted++
+        }
+
+        // Drop a Room row only when the package is gone from PackageManager AND the
+        // private APK file is gone. An unreadable APK keeps its row so the next launch
+        // can try again instead of wiping the install.
         val prefix = ExtensionLoader.TACHIYOMI_EXTENSION_PREFIX
-        for (row in installedDao.getAll()) {
-            if (!row.id.startsWith(prefix)) continue
-            if (row.id in discoveredPackages || row.id in localPackages) continue
-            Log.i(tag, "Removing stale system extension from DB: ${row.id}")
-            installedDao.delete(row.id)
+        val stillPresent = discoveredPackages + localPackages
+        val staleIds = InstalledExtensionReconcile.rowIdsToRemove(
+            rowIds = installedDao.getAll().map { it.id },
+            stillPresent = stillPresent,
+            apkOnDisk = localSnapshot.packageNames,
+            directoryReadable = localSnapshot.directoryReadable,
+            packagePrefix = prefix,
+        )
+        for (id in staleIds) {
+            Log.i(tag, "Removing stale system extension from DB: $id")
+            installedDao.delete(id)
         }
 
         refreshTrustCache()

@@ -43,7 +43,6 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.size.Scale
 import com.radiant.webtoon.ui.components.RadiantAsyncImage
-import com.radiant.webtoon.ui.components.RadiantScreenTitle
 import com.radiant.webtoon.ui.components.rememberSourceImageHeaders
 import com.radiant.webtoon.WebtoonApplication
 import com.radiant.webtoon.ui.components.AppMotion
@@ -258,7 +257,7 @@ fun LibraryScreen(
             TopAppBar(
                 title = {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        RadiantScreenTitle("Library")
+                        Text("Library")
                         if (items.isNotEmpty()) {
                             Spacer(Modifier.width(8.dp))
                             Badge(

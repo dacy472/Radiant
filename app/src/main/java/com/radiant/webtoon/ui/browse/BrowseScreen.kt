@@ -99,7 +99,7 @@ fun BrowseScreen(
                                 )
                             )
                         } else {
-                            com.radiant.webtoon.ui.components.RadiantScreenTitle("Browse")
+                            Text("Browse")
                         }
                     },
                     actions = {

@@ -18,8 +18,8 @@ android {
         applicationId = "com.radiant.webtoon"
         minSdk = 26
         targetSdk = 36
-        versionCode = 3
-        versionName = "0.1.2"
+        versionCode = 4
+        versionName = "0.1.3"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -69,6 +69,11 @@ kotlin {
 
 dependencies {
     implementation("androidx.core:core-ktx:1.12.0")
+    // Aligned with Mihon (1.18.0). Extensions call Profile.addOriginMatchedHeader /
+    // clearOriginMatchedHeader (webkit >= 1.15), e.g. Temple Scan's Turnstile flow; older
+    // versions crash with "No interface method clearOriginMatchedHeader". Also used for the
+    // Cloudflare WebView's Sec-CH-UA metadata.
+    implementation("androidx.webkit:webkit:1.18.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.7.0")
     implementation("androidx.lifecycle:lifecycle-runtime-compose:2.7.0")
     implementation("androidx.activity:activity-compose:1.8.2")

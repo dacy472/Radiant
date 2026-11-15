@@ -1,0 +1,23 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+    Monochrome layer for Android 13+ themed icons: single-colour silhouette
+    of the Radiant page with the light beam as negative space.
+    Same safe-zone sizing as the foreground (x 33..75, y 26..82).
+-->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- Left half of the page (left of the beam) -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M57,26 H40 A7,7 0 0 0 33,33 V75 A7,7 0 0 0 40,82 Z" />
+
+    <!-- Right half of the page (right of the beam) -->
+    <path
+        android:fillColor="#FFFFFF"
+        android:pathData="M67,26 H68 A7,7 0 0 1 75,33 V75 A7,7 0 0 1 68,82 H60 Z" />
+
+</vector>

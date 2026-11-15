@@ -115,6 +115,7 @@ fun WebtoonDetailScreen(
     val isInSelectionMode by viewModel.isInSelectionMode.collectAsStateWithLifecycle()
     val resumeTarget by viewModel.resumeTarget.collectAsStateWithLifecycle()
     var showMenu by remember { mutableStateOf(false) }
+    var showDownloadMenu by remember { mutableStateOf(false) }
     var showTrackDialog by remember { mutableStateOf(false) }
     var pendingDeleteChapterId by remember { mutableStateOf<String?>(null) }
 
@@ -218,16 +219,55 @@ fun WebtoonDetailScreen(
                             }
                         },
                         actions = {
-                            IconButton(
-                                onClick = {
-                                    viewModel.downloadUnread(context)
-                                    Toast.makeText(context, "Queued unread chapters", Toast.LENGTH_SHORT).show()
-                                },
-                            ) {
-                                Icon(Icons.Default.Download, contentDescription = "Download unread")
+                            Box {
+                                IconButton(
+                                    onClick = {
+                                        showMenu = false
+                                        showDownloadMenu = true
+                                    },
+                                ) {
+                                    Icon(Icons.Default.Download, contentDescription = "Download")
+                                }
+                                DropdownMenu(
+                                    expanded = showDownloadMenu,
+                                    onDismissRequest = { showDownloadMenu = false },
+                                ) {
+                                    DropdownMenuItem(
+                                        text = { Text("Download next 5 chapters") },
+                                        leadingIcon = { Icon(Icons.Default.FileDownload, contentDescription = null) },
+                                        onClick = {
+                                            showDownloadMenu = false
+                                            viewModel.downloadNext(context, 5)
+                                            Toast.makeText(context, "Queued next 5 chapters", Toast.LENGTH_SHORT).show()
+                                        },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Download All") },
+                                        leadingIcon = { Icon(Icons.Default.FileDownload, contentDescription = null) },
+                                        onClick = {
+                                            showDownloadMenu = false
+                                            viewModel.downloadAllMissing(context)
+                                            Toast.makeText(context, "Queued chapters (oldest first)", Toast.LENGTH_SHORT).show()
+                                        },
+                                    )
+                                    DropdownMenuItem(
+                                        text = { Text("Download Unread") },
+                                        leadingIcon = { Icon(Icons.Default.FileDownload, contentDescription = null) },
+                                        onClick = {
+                                            showDownloadMenu = false
+                                            viewModel.downloadUnread(context)
+                                            Toast.makeText(context, "Queued unread chapters", Toast.LENGTH_SHORT).show()
+                                        },
+                                    )
+                                }
                             }
                             Box {
-                                IconButton(onClick = { showMenu = true }) {
+                                IconButton(
+                                    onClick = {
+                                        showDownloadMenu = false
+                                        showMenu = true
+                                    },
+                                ) {
                                     Icon(Icons.Default.MoreVert, contentDescription = "More options")
                                 }
                                 DropdownMenu(
@@ -240,15 +280,6 @@ fun WebtoonDetailScreen(
                                         onClick = {
                                             showMenu = false
                                             viewModel.refreshFromNetwork()
-                                        }
-                                    )
-                                    DropdownMenuItem(
-                                        text = { Text("Download next 5") },
-                                        leadingIcon = { Icon(Icons.Default.FileDownload, contentDescription = null) },
-                                        onClick = {
-                                            showMenu = false
-                                            viewModel.downloadNext(context, 5)
-                                            Toast.makeText(context, "Queued next 5 chapters", Toast.LENGTH_SHORT).show()
                                         }
                                     )
                                     DropdownMenuItem(
@@ -305,10 +336,16 @@ fun WebtoonDetailScreen(
             if (isLoading && webtoon == null && chapters.isEmpty()) {
                 CircularProgressIndicator(modifier = Modifier.align(Alignment.Center))
             } else {
+                val resumeOverlaysList = resumeTarget != null && !isInSelectionMode
                 LazyColumn(
                     state = listState,
-                    modifier = Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(bottom = paddingValues.calculateBottomPadding()),
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(
+                            bottom = paddingValues.calculateBottomPadding() +
+                                if (resumeOverlaysList) ResumeFabClearance else 0.dp,
+                        ),
+                    contentPadding = PaddingValues(bottom = 8.dp),
                 ) {
                     item {
                         WebtoonHeader(
@@ -347,10 +384,6 @@ fun WebtoonDetailScreen(
                                 onWebViewClick(viewModel.getMangaPageUrl())
                             },
                             onTrackClick = { showTrackDialog = true },
-                            onDownloadClick = {
-                                viewModel.downloadAllMissing(context)
-                                Toast.makeText(context, "Queued chapters (oldest first)", Toast.LENGTH_SHORT).show()
-                            }
                         )
                     }
                     item {
@@ -407,8 +440,6 @@ fun WebtoonDetailScreen(
                             }
                         )
                     }
-                    // Keeps the last chapter row clear of the Start / Resume button.
-                    item { Spacer(Modifier.height(88.dp)) }
                 }
             }
 
@@ -501,6 +532,9 @@ private fun ResumeReadingButton(
 
 /** Small top app bar height (M3); the header starts below it so the cover never sits under the bar. */
 private val TopBarHeight = 64.dp
+
+/** Centered Start / Resume button height plus its scaffold margin, so chapter rows stay above it. */
+private val ResumeFabClearance = 88.dp
 
 @Composable
 fun WebtoonHeader(
@@ -724,7 +758,6 @@ fun WebtoonActions(
     onToggleFavorite: () -> Unit,
     onWebViewClick: () -> Unit,
     onTrackClick: () -> Unit,
-    onDownloadClick: () -> Unit
 ) {
     val inactive = MaterialTheme.colorScheme.onSurfaceVariant
     Row(
@@ -752,13 +785,6 @@ fun WebtoonActions(
             label = "WebView",
             tint = inactive,
             onClick = onWebViewClick,
-            modifier = Modifier.weight(1f),
-        )
-        ActionButton(
-            icon = Icons.Default.FileDownload,
-            label = "Download",
-            tint = inactive,
-            onClick = onDownloadClick,
             modifier = Modifier.weight(1f),
         )
     }

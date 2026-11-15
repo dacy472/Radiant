@@ -5,9 +5,9 @@ Database name: `webtoon_database`
 | Version | Source | Notes |
 |---------|--------|--------|
 | 9 | git `6450fed` | First `WebtoonDatabase` in this repo. Reconstructed from entity list at that commit. **Needs a populated device fixture.** |
-| 10 | git `68b5435` | Adds `tracks`. Reconstructed from `Track.kt` at that commit. **Needs a populated device fixture.** |
+| 10 | git `68b5435` | Adds `tracks`. Reconstructed from `Track.kt` at that commit. `installed_extensions` still has no `versionCode`. **Needs a populated device fixture.** |
 | 11, 12 | never shipped | These numbers never appeared in `WebtoonDatabase.kt`. Unsupported; open fails and leaves the file intact. |
-| 13 | git `c02f686` / release 0.1.0–0.1.1 | Adds `upcoming_releases` and `downloaded_chapters`. Current public installs. |
+| 13 | git `c02f686` / release 0.1.0–0.1.1 | Adds `upcoming_releases`, `downloaded_chapters`, and `installed_extensions.versionCode` (copied as 0 from v9/v10). Public installs from 0.1.0 onward. |
 | 14 | 0.1.2 | Source-aware chapter PK `(source, manga_id, url)` and history PK `(source_id, webtoon_id, chapter_id)`. |
 | 15 | 0.1.2 | Adds `chapters.last_page_offset` (position inside `last_page_read`, 1/10000 of page height) for exact webtoon resume. `ALTER TABLE ... ADD COLUMN ... DEFAULT 0`, no data rewrite. |
 

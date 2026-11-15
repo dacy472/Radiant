@@ -65,6 +65,23 @@ class ExtensionLoader(private val context: Context) {
             return dir
         }
 
+    /**
+     * Package names taken from private extension APK filenames, including files PackageManager
+     * could not parse. [LocalApkSnapshot.directoryReadable] is false when the directory could
+     * not be listed, so callers must not treat an empty set as "every APK is gone".
+     */
+    fun snapshotLocalApks(): LocalApkSnapshot {
+        val dir = extensionsDir
+        val files = dir.listFiles() ?: return LocalApkSnapshot(directoryReadable = false, packageNames = emptySet())
+        val names = files.mapNotNull { file ->
+            val name = file.name
+            if (!name.endsWith(".apk", ignoreCase = true)) return@mapNotNull null
+            if (name.contains(".staging", ignoreCase = true)) return@mapNotNull null
+            name.substring(0, name.length - 4).takeIf { it.isNotBlank() }
+        }.toSet()
+        return LocalApkSnapshot(directoryReadable = true, packageNames = names)
+    }
+
     /** Read-only APK copies for PathClassLoader (Android 14+ rejects writable dex paths). */
     private val readOnlyApkDir: File
         get() {
@@ -954,6 +971,11 @@ class ExtensionLoader(private val context: Context) {
         return false
     }
 }
+
+data class LocalApkSnapshot(
+    val directoryReadable: Boolean,
+    val packageNames: Set<String>,
+)
 
 data class ExtensionInfo(
     val packageName: String,

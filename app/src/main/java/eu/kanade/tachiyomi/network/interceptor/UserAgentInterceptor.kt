@@ -4,8 +4,11 @@ import okhttp3.Interceptor
 import okhttp3.Response
 
 /**
- * Injects the device WebView User-Agent on every OkHttp request so scrapers match
- * [android.webkit.WebSettings.getDefaultUserAgent] used by Cloudflare WebView bypass.
+ * Adds a User-Agent only when the request has none (Mihon behaviour).
+ *
+ * Extensions that pin their own UA keep it: the `cf_clearance` Cloudflare issues is bound to
+ * the exact UA that solved the challenge, so rewriting the header after the fact makes every
+ * clearance useless and forces a fresh challenge on each call.
  *
  * [FALLBACK_USER_AGENT] is only used in unit tests or when WebView is unavailable.
  */
@@ -22,17 +25,22 @@ open class UserAgentInterceptor(
         }
 
     override fun intercept(chain: Interceptor.Chain): Response {
-        // Prefer the pinned [userAgent] (settings sync + Cloudflare WebView bypass).
+        val original = chain.request()
+        if (!original.header("User-Agent").isNullOrEmpty()) {
+            return chain.proceed(original)
+        }
         val ua = userAgent.ifBlank { defaultUserAgentProvider() }.ifBlank { FALLBACK_USER_AGENT }
         if (ua != userAgent) userAgent = ua
-        val request = chain.request().newBuilder()
-            .header("User-Agent", ua)
-            .build()
-        return chain.proceed(request)
+        return chain.proceed(
+            original.newBuilder()
+                .removeHeader("User-Agent")
+                .addHeader("User-Agent", ua)
+                .build(),
+        )
     }
 
     companion object {
-        /** Last-resort UA when [WebSettings.getDefaultUserAgent] cannot be read. */
+        /** Last-resort UA when [android.webkit.WebSettings.getDefaultUserAgent] cannot be read. */
         const val FALLBACK_USER_AGENT =
             "Mozilla/5.0 (Linux; Android 10; K) AppleWebKit/537.36 (KHTML, like Gecko) " +
                 "Chrome/149.0.0.0 Mobile Safari/537.36"

@@ -10,6 +10,8 @@ import com.radiant.webtoon.core.source.ExtensionManager
 import com.radiant.webtoon.core.service.ExtensionColdStartUpdate
 import com.radiant.webtoon.core.service.ExtensionUpdateWorker
 import com.radiant.webtoon.core.service.LibraryUpdateWorker
+import android.util.Log
+import kotlinx.coroutines.CoroutineExceptionHandler
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -32,7 +34,11 @@ import eu.kanade.tachiyomi.network.interceptor.rateLimit
 import eu.kanade.tachiyomi.network.GET
 
 class WebtoonApplication : Application(), ImageLoaderFactory {
-    private val applicationScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    private val applicationScope = CoroutineScope(
+        SupervisorJob() + Dispatchers.IO + CoroutineExceptionHandler { _, error ->
+            Log.e("WebtoonApplication", "Background startup work failed", error)
+        },
+    )
 
     override fun newImageLoader(): ImageLoader {
         // Coil ImageLoaderFactory: custom OkHttp client + memory/disk caches (see RadiantImageLoader).
@@ -143,6 +149,8 @@ class WebtoonApplication : Application(), ImageLoaderFactory {
         super.onCreate()
 
         com.radiant.webtoon.core.debug.PageListDebugLogger.init(this)
+        // Must run before the first ImageLoader is created (lazy, on first composition).
+        com.radiant.webtoon.core.image.ImageCacheMaintenance.runIfNeeded(this)
 
         // Full Injekt graph for Tachiyomi/Mihon extensions — must run before any DEX load
         ExtensionCompatModule.install(this)
@@ -155,6 +163,7 @@ class WebtoonApplication : Application(), ImageLoaderFactory {
         // then purge / load / update check (see ExtensionColdStartUpdate).
         ExtensionColdStartUpdate.schedule(this@WebtoonApplication, applicationScope)
         applicationScope.launch {
+            settingsManager.migrateStoredPreferenceTypes()
             settingsManager.migrateAutoUpdateToManual()
             settingsManager.unpinSource(com.radiant.webtoon.core.local.LocalSourceIds.LOCAL_SOURCE_ID)
             com.radiant.webtoon.core.download.DownloadIndexBackfill.runIfNeeded(

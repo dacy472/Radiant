@@ -451,6 +451,7 @@ fun WebtoonApp() {
                     onBrowseClick = { sourceId ->
                         navController.navigate("source/${encodeNav(sourceId)}")
                     },
+                    onBackClick = { navController.popBackStack() },
                     onWebViewClick = { sourceId, url ->
                         navController.navigate("webview?url=${encodeNav(url)}&sourceId=${encodeNav(sourceId)}")
                     },
@@ -479,6 +480,7 @@ fun WebtoonApp() {
                     onBrowseClick = { sourceId ->
                         navController.navigate("source/${encodeNav(sourceId)}")
                     },
+                    onBackClick = { navController.popBackStack() },
                     onWebViewClick = { sourceId, url ->
                         navController.navigate("webview?url=${encodeNav(url)}&sourceId=${encodeNav(sourceId)}")
                     },

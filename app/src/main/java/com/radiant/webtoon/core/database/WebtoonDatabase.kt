@@ -60,7 +60,8 @@ abstract class WebtoonDatabase : RoomDatabase() {
                 // Force a real open so an unsupported schema fails here, not on first DAO call.
                 instance.openHelper.writableDatabase
                 instance
-            } catch (e: IllegalStateException) {
+            } catch (e: Exception) {
+                if (e is DatabaseUpgradeException || e is java.util.concurrent.CancellationException) throw e
                 val wrapped = DatabaseUpgradeException(
                     "Radiant could not upgrade the local library database. " +
                         "The original file was left unchanged. Reinstall the previous version " +

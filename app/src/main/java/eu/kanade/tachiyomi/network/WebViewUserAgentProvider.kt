@@ -65,8 +65,10 @@ object WebViewUserAgentProvider {
 
     private fun fetchUnsafe(context: Context): String {
         return try {
-            WebSettings.getDefaultUserAgent(context).also { ua ->
-                Log.i(TAG, "Using WebView default User-Agent (${ua.length} chars)")
+            // Reduce to the Chrome-on-Android form (drop the "; wv" build marker and
+            // "Version/4.0") so Cloudflare scores us like a browser, not an embedded WebView.
+            WebViewUtil.inferChromeUserAgent(WebSettings.getDefaultUserAgent(context)).also { ua ->
+                Log.i(TAG, "Using inferred Chrome User-Agent (${ua.length} chars)")
             }
         } catch (e: Exception) {
             Log.w(TAG, "WebSettings.getDefaultUserAgent failed; using fallback", e)

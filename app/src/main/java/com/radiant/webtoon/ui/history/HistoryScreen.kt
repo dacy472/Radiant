@@ -64,7 +64,7 @@ fun HistoryScreen(
         modifier = Modifier.nestedScroll(scrollBehavior.nestedScrollConnection),
         topBar = {
             TopAppBar(
-                title = { com.radiant.webtoon.ui.components.RadiantScreenTitle("History") },
+                title = { Text("History") },
                 scrollBehavior = scrollBehavior,
                 actions = {
                     if (historyItems.isNotEmpty()) {

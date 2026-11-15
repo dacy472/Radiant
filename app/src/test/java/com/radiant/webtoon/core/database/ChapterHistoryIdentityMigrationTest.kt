@@ -187,6 +187,89 @@ class ChapterHistoryIdentityMigrationTest {
     }
 
     @Test
+    fun duplicateChapterIdentityKeepsTheRowWithProgress() {
+        withMemoryDb { conn ->
+            conn.exec(
+                """
+                CREATE TABLE chapters (
+                    url TEXT NOT NULL,
+                    manga_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    scanlator TEXT,
+                    read INTEGER NOT NULL,
+                    bookmark INTEGER NOT NULL,
+                    last_page_read INTEGER NOT NULL,
+                    date_fetch INTEGER NOT NULL,
+                    date_upload INTEGER NOT NULL,
+                    chapter_number REAL NOT NULL,
+                    source TEXT NOT NULL
+                )
+                """.trimIndent(),
+            )
+            conn.exec(
+                """
+                INSERT INTO chapters (
+                    url, manga_id, name, scanlator, read, bookmark, last_page_read,
+                    date_fetch, date_upload, chapter_number, source
+                ) VALUES
+                ('/chapter/1', '/series/demo', 'unread', NULL, 0, 0, 0, 1, 0, 1.0, 'source-a'),
+                ('/chapter/1', '/series/demo', 'read', NULL, 1, 1, 8, 2, 0, 1.0, 'source-a')
+                """.trimIndent(),
+            )
+
+            val executor = DatabaseMigrations.SqlExecutor { sql -> conn.exec(sql) }
+            DatabaseMigrations.migrateChaptersToSourceAwarePk(executor)
+
+            assertEquals(1, conn.queryLong("SELECT COUNT(*) FROM chapters"))
+            val kept = conn.queryRow(
+                "SELECT name, read, bookmark, last_page_read FROM chapters",
+            )!!
+            assertEquals("read", kept["name"])
+            assertEquals(1, kept["read"])
+            assertEquals(1, kept["bookmark"])
+            assertEquals(8, kept["last_page_read"])
+        }
+    }
+
+    @Test
+    fun v10InstalledExtensionGainsVersionCodeWithoutDroppingTheRow() {
+        withMemoryDb { conn ->
+            conn.exec(
+                """
+                CREATE TABLE installed_extensions (
+                    id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    isTrusted INTEGER NOT NULL,
+                    dateInstalled INTEGER NOT NULL,
+                    PRIMARY KEY(id)
+                )
+                """.trimIndent(),
+            )
+            conn.exec(
+                """
+                INSERT INTO installed_extensions (id, name, isTrusted, dateInstalled)
+                VALUES ('eu.kanade.tachiyomi.extension.en.flamecomics', 'Flame Comics', 1, 42)
+                """.trimIndent(),
+            )
+
+            val executor = DatabaseMigrations.SqlExecutor { sql -> conn.exec(sql) }
+            DatabaseMigrations.migrateInstalledExtensionsAddVersionCode(executor)
+
+            val row = conn.queryRow(
+                "SELECT name, isTrusted, dateInstalled, versionCode FROM installed_extensions",
+            )!!
+            assertEquals("Flame Comics", row["name"])
+            assertEquals(1, row["isTrusted"])
+            assertEquals(42, row["dateInstalled"])
+            assertEquals(0, row["versionCode"])
+            val defaultValue = conn.queryString(
+                "SELECT COALESCE(dflt_value, '') FROM pragma_table_info('installed_extensions') WHERE name = 'versionCode'",
+            )
+            assertEquals("", defaultValue)
+        }
+    }
+
+    @Test
     fun v14ToV15AddsPageOffsetAndKeepsProgress() {
         withMemoryDb { conn ->
             conn.exec(DatabaseMigrations.CREATE_CHAPTERS_V14.trimIndent())

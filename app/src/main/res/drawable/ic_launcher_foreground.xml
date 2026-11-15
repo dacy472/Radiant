@@ -1,27 +1,32 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+    Radiant mark: two stacked reading pages with a beam of light pouring
+    through the front page. Sized for the adaptive-icon safe zone
+    (centre 54,54 / radius 33): artwork spans x 32..77, y 26..83.
+-->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp"
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
-    
-    <!-- Outer Glow/Sunburst -->
-    <path
-        android:fillColor="#FFD700"
-        android:pathData="M54,20L58,40L78,44L58,48L54,68L50,48L30,44L50,40Z" />
-    <path
-        android:fillColor="#FFD700"
-        android:pathData="M54,10L56,30L76,34L56,38L54,58L52,38L32,34L52,30Z"
-        android:alpha="0.3" />
 
-    <!-- Stylized "R" -->
+    <!-- Back page: amber (the light source behind the page) -->
     <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M35,30h20c10,0 15,5 15,12s-5,12 -15,12h-12v20h-8v-44z M43,38v10h12c5,0 7,-2 7,-5s-2,-5 -7,-5h-12z" />
-    
-    <!-- Decorative Ray -->
+        android:fillColor="#F5B942"
+        android:pathData="M45,26 h24 a8,8 0 0 1 8,8 v36 a8,8 0 0 1 -8,8 h-24 a8,8 0 0 1 -8,-8 v-36 a8,8 0 0 1 8,-8z" />
+
+    <!-- Front page: ivory -->
     <path
-        android:fillColor="#FFD700"
-        android:pathData="M51,54l20,20h8l-20,-20z" />
+        android:fillColor="#F4EFE4"
+        android:pathData="M40,31 h24 a8,8 0 0 1 8,8 v36 a8,8 0 0 1 -8,8 h-24 a8,8 0 0 1 -8,-8 v-36 a8,8 0 0 1 8,-8z" />
+
+    <!-- Amber beam, clipped to the front page -->
+    <group>
+        <clip-path
+            android:pathData="M40,31 h24 a8,8 0 0 1 8,8 v36 a8,8 0 0 1 -8,8 h-24 a8,8 0 0 1 -8,-8 v-36 a8,8 0 0 1 8,-8z" />
+        <path
+            android:fillColor="#F5B942"
+            android:pathData="M58,31 L69,31 L58,83 L36,83z" />
+    </group>
 
 </vector>
