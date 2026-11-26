@@ -6,6 +6,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.DeleteSweep
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material3.*
@@ -58,6 +59,7 @@ fun HistoryScreen(
     val dateFormatPattern by (androidx.compose.ui.platform.LocalContext.current.applicationContext as WebtoonApplication)
         .settingsManager.dateFormat.collectAsState(initial = "MM/dd/yyyy")
     var showClearDialog by remember { mutableStateOf(false) }
+    var pendingRemoval by remember { mutableStateOf<HistoryItem?>(null) }
     val scrollBehavior = TopAppBarDefaults.pinnedScrollBehavior()
 
     Scaffold(
@@ -77,6 +79,30 @@ fun HistoryScreen(
             )
         }
     ) { padding ->
+        pendingRemoval?.let { pending ->
+            SpringAlertDialog(
+                onDismissRequest = { pendingRemoval = null },
+                title = { Text("Remove from history") },
+                text = {
+                    Text("Remove \"${pending.webtoonTitle}\" from history? Other titles stay. Chapters already in your library are not deleted.")
+                },
+                confirmButton = {
+                    TextButton(
+                        onClick = {
+                            viewModel.removeWebtoon(pending.sourceId, pending.webtoonId)
+                            pendingRemoval = null
+                        }
+                    ) {
+                        Text("Remove", color = MaterialTheme.colorScheme.error)
+                    }
+                },
+                dismissButton = {
+                    TextButton(onClick = { pendingRemoval = null }) {
+                        Text("Cancel")
+                    }
+                },
+            )
+        }
         if (showClearDialog) {
             SpringAlertDialog(
                 onDismissRequest = { showClearDialog = false },
@@ -138,7 +164,8 @@ fun HistoryScreen(
                         },
                         onCoverClick = {
                             onWebtoonClick(item.sourceId, item.webtoonId)
-                        }
+                        },
+                        onRemove = { pendingRemoval = item },
                     )
                 }
             }
@@ -153,6 +180,7 @@ fun HistoryItemRow(
     dateFormatPattern: String = "MM/dd/yyyy",
     onClick: () -> Unit,
     onCoverClick: () -> Unit,
+    onRemove: () -> Unit,
 ) {
     val coverHeaders = rememberSourceImageHeaders(sourceId = item.sourceId)
     Column(modifier = modifier) {
@@ -199,6 +227,14 @@ fun HistoryItemRow(
                     text = formatRelativeTime(item.lastRead, dateFormatPattern),
                     style = MaterialTheme.typography.labelSmall,
                     color = MaterialTheme.colorScheme.primary.copy(alpha = 0.7f),
+                )
+            }
+
+            IconButton(onClick = onRemove) {
+                Icon(
+                    Icons.Default.Delete,
+                    contentDescription = "Remove ${item.webtoonTitle} from history",
+                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
             }
         }

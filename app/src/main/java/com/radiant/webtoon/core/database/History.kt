@@ -37,6 +37,9 @@ interface HistoryDao {
     @Query("DELETE FROM history WHERE chapter_id = :chapterId AND webtoon_id = :webtoonId AND source_id = :sourceId")
     suspend fun delete(chapterId: String, webtoonId: String, sourceId: String)
 
+    @Query("DELETE FROM history WHERE webtoon_id = :webtoonId AND source_id = :sourceId")
+    suspend fun deleteForWebtoon(webtoonId: String, sourceId: String)
+
     @Query("DELETE FROM history")
     suspend fun deleteAll()
 }

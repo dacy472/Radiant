@@ -429,7 +429,8 @@ fun LibraryScreen(
                             )
                         }
                     }
-                    items(items, key = { "${it.manga.source}|${it.manga.url}" }) { item ->
+                    val uniqueItems = items.distinctBy { "${it.manga.source}|${it.manga.url}" }
+                    items(uniqueItems, key = { "${it.manga.source}|${it.manga.url}" }) { item ->
                         WebtoonThumbnailCard(
                             webtoon = Webtoon(
                                 id = item.manga.url,

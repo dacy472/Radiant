@@ -18,8 +18,8 @@ android {
         applicationId = "com.radiant.webtoon"
         minSdk = 26
         targetSdk = 36
-        versionCode = 4
-        versionName = "0.1.3"
+        versionCode = 5
+        versionName = "0.1.4"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -32,6 +32,9 @@ android {
     buildTypes {
         debug {
             isMinifyEnabled = false
+            // Same certificate as release. A higher versionCode then installs over the copy
+            // already on the phone; a different key would force an uninstall.
+            signingConfig = signingConfigs.getByName("debug")
         }
         release {
             isMinifyEnabled = false

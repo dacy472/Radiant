@@ -28,8 +28,15 @@ class JavaScriptEngine(@Suppress("UNUSED_PARAMETER") context: Context? = null) {
      * Blocking variant for use inside extension [pageListParse] and other synchronous paths.
      */
     fun <T> evaluateBlocking(script: String): T {
-        QuickJs.create().use { quickJs ->
-            return quickJs.evaluate(script) as T
+        try {
+            QuickJs.create().use { quickJs ->
+                return quickJs.evaluate(script) as T
+            }
+        } catch (t: Throwable) {
+            // A failed script or a missing native lib must surface as a chapter error.
+            // UnsatisfiedLinkError and ClassCastException are not Exception, so an uncaught
+            // throw here closes the app.
+            throw java.io.IOException("JavaScript evaluation failed", t)
         }
     }
 

@@ -135,17 +135,33 @@ class MainActivity : FragmentActivity() {
             }
 
             WebtoonTheme(themeMode = themeMode) {
-                val dbError = remember {
-                    runCatching { app.database.openHelper.writableDatabase }.exceptionOrNull()
+                // Open Room off the main thread. A migration or a large library on the
+                // first frame can freeze the process until Android closes it.
+                var dbState by remember { mutableStateOf<Result<Unit>?>(null) }
+                LaunchedEffect(app) {
+                    dbState = kotlinx.coroutines.withContext(kotlinx.coroutines.Dispatchers.IO) {
+                        runCatching { app.database.openHelper.writableDatabase }.map { }
+                    }
                 }
-                if (dbError != null) {
-                    DatabaseUpgradeErrorScreen(dbError)
-                } else {
-                    BiometricLockGate(
-                        lockEnabled = lockEnabled,
-                        activity = this@MainActivity
+                when (val state = dbState) {
+                    null -> Box(
+                        modifier = Modifier.fillMaxSize(),
+                        contentAlignment = Alignment.Center,
                     ) {
-                        WebtoonApp()
+                        CircularProgressIndicator()
+                    }
+                    else -> {
+                        val dbError = state.exceptionOrNull()
+                        if (dbError != null) {
+                            DatabaseUpgradeErrorScreen(dbError)
+                        } else {
+                            BiometricLockGate(
+                                lockEnabled = lockEnabled,
+                                activity = this@MainActivity
+                            ) {
+                                WebtoonApp()
+                            }
+                        }
                     }
                 }
             }
@@ -153,8 +169,9 @@ class MainActivity : FragmentActivity() {
     }
 
     override fun onDestroy() {
+        // onCreate can fail before the receiver is registered; unregister then closes the app.
+        runCatching { unregisterReceiver(installReceiver) }
         super.onDestroy()
-        unregisterReceiver(installReceiver)
     }
 }
 

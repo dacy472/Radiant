@@ -136,7 +136,8 @@ class WebtoonDetailViewModel(
 
         val chaptersJob = viewModelScope.launch {
             chapterDao.getChaptersFlow(webtoonId, sourceId).collect { chapters ->
-                _chapters.value = chapters
+                // A repeated chapter url crashes the list (duplicate LazyColumn keys).
+                _chapters.value = chapters.distinctBy { it.url }
                 // Drop selections for chapters no longer present
                 val urls = chapters.map { it.url }.toSet()
                 _selectedChapterIds.value = _selectedChapterIds.value.filter { it in urls }.toSet()

@@ -106,7 +106,7 @@ fun UpdatesScreen(
 
                         items(
                             group.items,
-                            key = { "${it.chapter.manga_id}|${it.chapter.url}" }
+                            key = { "${it.sourceId}|${it.chapter.manga_id}|${it.chapter.url}" }
                         ) { update ->
                             UpdateItemRow(
                                 modifier = Modifier.animatedListRow(),

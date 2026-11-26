@@ -18,7 +18,8 @@ class HistoryViewModel(
         .map { items ->
             items.map { item ->
                 HistoryItem(
-                    id = item.chapter_id,
+                    // chapter urls repeat across titles; the list key must not.
+                    id = "${item.source_id}|${item.webtoon_id}|${item.chapter_id}",
                     webtoonTitle = item.webtoon_title,
                     chapterTitle = item.chapter_title,
                     webtoonThumbnail = item.webtoon_thumbnail,
@@ -38,6 +39,12 @@ class HistoryViewModel(
     fun clearHistory() {
         viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
             repository.clearHistory()
+        }
+    }
+
+    fun removeWebtoon(sourceId: String, webtoonId: String) {
+        viewModelScope.launch(kotlinx.coroutines.Dispatchers.IO) {
+            repository.removeWebtoonFromHistory(sourceId, webtoonId)
         }
     }
 }

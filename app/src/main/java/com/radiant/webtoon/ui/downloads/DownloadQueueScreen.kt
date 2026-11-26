@@ -34,7 +34,7 @@ fun DownloadQueueScreen(
     val downloadSpeed by queueManager.downloadSpeed.collectAsStateWithLifecycle()
     var exitingKeys by remember { mutableStateOf(setOf<String>()) }
 
-    fun taskKey(task: DownloadTask) = "${task.sourceId}_${task.chapterId}"
+    fun taskKey(task: DownloadTask) = "${task.sourceId}|${task.webtoonId}|${task.chapterId}"
 
     fun cancelWithAnimation(task: DownloadTask) {
         val key = taskKey(task)

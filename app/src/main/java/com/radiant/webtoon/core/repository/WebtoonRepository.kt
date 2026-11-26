@@ -240,6 +240,11 @@ class WebtoonRepository(
         historyDao.deleteAll()
     }
 
+    /** Drops every history row for one title. Chapter read flags and downloads stay. */
+    suspend fun removeWebtoonFromHistory(sourceId: String, webtoonId: String) = withContext(Dispatchers.IO) {
+        historyDao.deleteForWebtoon(webtoonId, sourceId)
+    }
+
     // ─── Categories ───
 
     suspend fun getCategories(): List<Category> = withContext(Dispatchers.IO) {
